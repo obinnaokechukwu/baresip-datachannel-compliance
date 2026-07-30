@@ -5,3 +5,4 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mkdir -p "$ROOT/.work"
 cd "$ROOT/pion-endpoint"
 go build -trimpath -o "$ROOT/.work/pion-endpoint" .
+go build -trimpath -o "$ROOT/.work/turn-server" ./cmd/turn-server

@@ -41,5 +41,6 @@ The independent Pion endpoint is built outside the Python environment:
 ./scripts/build-pion-endpoint
 ```
 
-`dc-product-acceptance` uses `.work/pion-endpoint` by default and records the
-resolved Pion module version in each Pion scenario's evidence bundle.
+`dc-product-acceptance` uses `.work/pion-endpoint` and `.work/turn-server` by
+default. It records the resolved Pion module version and includes a relay-only
+TURN/UDP scenario whose selected local candidate must be `relay`.

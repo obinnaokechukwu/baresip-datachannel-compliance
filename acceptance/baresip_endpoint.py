@@ -16,11 +16,17 @@ class BaresipEndpoint:
         source: Path,
         library_paths: tuple[Path, ...],
         log_path: Path,
+        ice_server: str | None = None,
+        ice_username: str | None = None,
+        ice_password: str | None = None,
     ) -> None:
         self._executable = executable
         self._source = source
         self._library_paths = library_paths
         self._log_path = log_path
+        self._ice_server = ice_server
+        self._ice_username = ice_username
+        self._ice_password = ice_password
         self._process: asyncio.subprocess.Process | None = None
         self._log_task: asyncio.Task[None] | None = None
         self._session_id: str | None = None
@@ -33,11 +39,15 @@ class BaresipEndpoint:
             paths.append(existing)
         env["LD_LIBRARY_PATH"] = ":".join(paths)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        ice_arguments = ["-i", self._ice_server or "null"]
+        if self._ice_username is not None:
+            ice_arguments.extend(("-u", self._ice_username))
+        if self._ice_password is not None:
+            ice_arguments.extend(("-p", self._ice_password))
         self._process = await asyncio.create_subprocess_exec(
             str(self._executable),
             "-v",
-            "-i",
-            "null",
+            *ice_arguments,
             "-w",
             str(self._source / "webrtc" / "www"),
             cwd=self._log_path.parent,

@@ -23,9 +23,13 @@ type message struct {
 }
 
 type request struct {
-	BaseURL  string    `json:"baseUrl"`
-	Label    string    `json:"label"`
-	Messages []message `json:"messages"`
+	BaseURL        string    `json:"baseUrl"`
+	Label          string    `json:"label"`
+	Messages       []message `json:"messages"`
+	TURNURL        string    `json:"turnUrl"`
+	TURNUsername   string    `json:"turnUsername"`
+	TURNCredential string    `json:"turnCredential"`
+	ForceRelay     bool      `json:"forceRelay"`
 }
 
 type description struct {
@@ -34,15 +38,18 @@ type description struct {
 }
 
 type result struct {
-	Verdict         string    `json:"verdict"`
-	Failures        []string  `json:"failures"`
-	Messages        []message `json:"messages"`
-	Offer           string    `json:"offer"`
-	Answer          string    `json:"answer"`
-	ConnectionState string    `json:"connectionState"`
-	ICEState        string    `json:"iceState"`
-	ChannelState    string    `json:"channelState"`
-	PionVersion     string    `json:"pionVersion"`
+	Verdict             string    `json:"verdict"`
+	Failures            []string  `json:"failures"`
+	Messages            []message `json:"messages"`
+	Offer               string    `json:"offer"`
+	Answer              string    `json:"answer"`
+	ConnectionState     string    `json:"connectionState"`
+	ICEState            string    `json:"iceState"`
+	ChannelState        string    `json:"channelState"`
+	PionVersion         string    `json:"pionVersion"`
+	LocalCandidateType  string    `json:"localCandidateType"`
+	RemoteCandidateType string    `json:"remoteCandidateType"`
+	SelectedPair        string    `json:"selectedPair"`
 }
 
 func pionVersion() string {
@@ -138,7 +145,18 @@ func run(input request) (output result) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	config := webrtc.Configuration{}
+	if input.TURNURL != "" {
+		config.ICEServers = []webrtc.ICEServer{{
+			URLs:       []string{input.TURNURL},
+			Username:   input.TURNUsername,
+			Credential: input.TURNCredential,
+		}}
+	}
+	if input.ForceRelay {
+		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	pc, err := webrtc.NewPeerConnection(config)
 	if err != nil {
 		output.Failures = []string{err.Error()}
 		return output
@@ -242,6 +260,15 @@ func run(input request) (output result) {
 	output.ConnectionState = pc.ConnectionState().String()
 	output.ICEState = pc.ICEConnectionState().String()
 	output.ChannelState = channel.ReadyState().String()
+	pair, err := pc.SCTP().Transport().ICETransport().
+		GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		output.Failures = []string{"selected ICE pair unavailable"}
+		return output
+	}
+	output.LocalCandidateType = pair.Local.Typ.String()
+	output.RemoteCandidateType = pair.Remote.Typ.String()
+	output.SelectedPair = pair.String()
 	output.Verdict = "PASS"
 	return output
 }

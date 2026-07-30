@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -654,18 +655,66 @@ async def run_pion_scenario(
     libre: Path,
     library_paths: tuple[Path, ...],
     command: str,
+    turn_server: Path | None = None,
+    forced_relay: bool = False,
 ) -> Verdict:
-    scenario = ProductScenario("baresip-pion-data-only", "pion", False)
+    scenario = ProductScenario(
+        "baresip-pion-forced-turn"
+        if forced_relay
+        else "baresip-pion-data-only",
+        "pion",
+        False,
+    )
     destination = evidence_root / scenario.name
     destination.mkdir(parents=True, exist_ok=True)
-    endpoint = BaresipEndpoint(
-        executable, baresip, library_paths, destination / "baresip.log"
-    )
+    endpoint: BaresipEndpoint | None = None
+    turn_process: asyncio.subprocess.Process | None = None
     failures: list[str] = []
     values = list(payloads())
     label = "pion-acceptance"
+    turn_url = ""
+    turn_username = "baresip"
+    turn_password = "acceptance"
 
     try:
+        if forced_relay:
+            if turn_server is None:
+                raise RuntimeError("forced relay requires a TURN server")
+            route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                route.connect(("192.0.2.1", 9))
+                relay_ip = route.getsockname()[0]
+            finally:
+                route.close()
+            turn_process = await asyncio.create_subprocess_exec(
+                str(turn_server),
+                "-public-ip",
+                relay_ip,
+                "-username",
+                turn_username,
+                "-password",
+                turn_password,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            assert turn_process.stdout is not None
+            ready_line = await asyncio.wait_for(
+                turn_process.stdout.readline(), 10.0
+            )
+            ready = json.loads(ready_line)
+            if not ready.get("ready"):
+                raise RuntimeError("TURN server did not become ready")
+            turn_url = f"turn:{ready['address']}?transport=udp"
+
+        endpoint = BaresipEndpoint(
+            executable,
+            baresip,
+            library_paths,
+            destination / "baresip.log",
+            ice_server=turn_url or None,
+            ice_username=turn_username if forced_relay else None,
+            ice_password=turn_password if forced_relay else None,
+        )
         await endpoint.start()
         process = await asyncio.create_subprocess_exec(
             str(pion_endpoint),
@@ -680,6 +729,10 @@ async def run_pion_scenario(
                 {"type": message_type, "payloadHex": payload.hex()}
                 for message_type, payload in values
             ],
+            "turnUrl": turn_url,
+            "turnUsername": turn_username,
+            "turnCredential": turn_password,
+            "forceRelay": forced_relay,
         }
         stdout, stderr = await asyncio.wait_for(
             process.communicate(json.dumps(request).encode()), 75.0
@@ -707,6 +760,18 @@ async def run_pion_scenario(
             failures.append("Pion ICE is not connected")
         if result.get("channelState") != "open":
             failures.append("Pion data channel is not open")
+        if forced_relay:
+            if result.get("localCandidateType") != "relay":
+                failures.append("Pion selected local candidate is not relay")
+            candidates = [
+                line
+                for line in result.get("offer", "").splitlines()
+                if line.startswith("a=candidate:")
+            ]
+            if not candidates or any(
+                " typ relay " not in f" {line} " for line in candidates
+            ):
+                failures.append("Pion offer was not relay-only")
 
         await endpoint.close()
         log = (destination / "baresip.log").read_text(errors="replace")
@@ -730,6 +795,9 @@ async def run_pion_scenario(
                     "connectionState",
                     "iceState",
                     "channelState",
+                    "localCandidateType",
+                    "remoteCandidateType",
+                    "selectedPair",
                 )
             },
         )
@@ -754,7 +822,13 @@ async def run_pion_scenario(
         )
         return Verdict.INFRA_ERROR
     finally:
-        await endpoint.close()
+        if endpoint is not None:
+            await endpoint.close()
+        if turn_process is not None:
+            if turn_process.returncode is None:
+                turn_process.terminate()
+            _, turn_stderr = await turn_process.communicate()
+            (destination / "turn-server.log").write_bytes(turn_stderr)
 
 
 def calibrate_product_oracle() -> dict[str, str]:
