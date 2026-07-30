@@ -20,6 +20,7 @@ test = ["pytest==8.4.1", "pytest-asyncio==1.1.0"]
 [project.scripts]
 dc-acceptance = "acceptance.cli:main"
 dc-product-acceptance = "acceptance.product_cli:main"
+dc-release-audit = "acceptance.release_audit:main"
 
 [tool.setuptools.packages.find]
 include = ["acceptance*"]
