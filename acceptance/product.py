@@ -1045,6 +1045,131 @@ async def run_lifecycle_campaign(
         await endpoint.close()
 
 
+async def run_abrupt_peer_death(
+    evidence_root: Path,
+    executable: Path,
+    pion_endpoint: Path,
+    baresip: Path,
+    libre: Path,
+    library_paths: tuple[Path, ...],
+    command: str,
+) -> Verdict:
+    scenario = ProductScenario(
+        "baresip-pion-abrupt-peer-death", "pion", False
+    )
+    destination = evidence_root / scenario.name
+    destination.mkdir(parents=True, exist_ok=True)
+    endpoint = BaresipEndpoint(
+        executable, baresip, library_paths, destination / "baresip.log"
+    )
+    failures: list[str] = []
+    teardown_budget = 5.0
+    rss_growth_budget = 8 * 1024 * 1024
+    fd_growth_budget = 1
+    thread_growth_budget = 1
+    result: dict[str, Any] = {}
+    returncode: int | None = None
+
+    try:
+        await endpoint.start()
+        baseline = endpoint.resource_snapshot()
+        process = await asyncio.create_subprocess_exec(
+            str(pion_endpoint),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        request = {
+            "baseUrl": "http://127.0.0.1:9000",
+            "label": "abrupt-peer-death",
+            "messages": [{"type": "binary", "payloadHex": "00"}],
+            "abortAfterOpen": True,
+        }
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(json.dumps(request).encode()), 75.0
+        )
+        returncode = process.returncode
+        (destination / "pion.log").write_bytes(stderr)
+        result = json.loads(stdout)
+        if result.get("verdict") != Verdict.PASS:
+            failures.extend(result.get("failures") or [])
+        if returncode != -signal.SIGKILL:
+            failures.append("Pion endpoint did not terminate by SIGKILL")
+        if result.get("connectionState") != "connected":
+            failures.append("Pion was not connected before abrupt death")
+        if result.get("iceState") not in {"connected", "completed"}:
+            failures.append("Pion ICE was not connected before abrupt death")
+        if result.get("channelState") != "open":
+            failures.append("Pion channel was not open before abrupt death")
+        session_id = result.get("sessionId")
+        if not session_id:
+            failures.append("Pion did not report the active session ID")
+        else:
+            teardown_started = time.monotonic()
+            await endpoint.delete_session_id(session_id)
+            teardown_elapsed = time.monotonic() - teardown_started
+            if teardown_elapsed > teardown_budget:
+                failures.append("abrupt-death teardown exceeded 5 seconds")
+
+        await asyncio.sleep(0.1)
+        final = endpoint.resource_snapshot()
+        if final["rssBytes"] - baseline["rssBytes"] > rss_growth_budget:
+            failures.append("abrupt-death RSS growth exceeded 8 MiB")
+        if (
+            final["fileDescriptors"] - baseline["fileDescriptors"]
+            > fd_growth_budget
+        ):
+            failures.append(
+                "abrupt-death file-descriptor growth exceeded 1"
+            )
+        if final["threads"] - baseline["threads"] > thread_growth_budget:
+            failures.append("abrupt-death thread growth exceeded 1")
+
+        await endpoint.close()
+        log = (destination / "baresip.log").read_text(errors="replace")
+        if "connectivity check is complete" not in log:
+            failures.append("baresip log lacks completed ICE evidence")
+        if "verified sha-256 fingerprint OK" not in log:
+            failures.append("baresip log lacks verified DTLS evidence")
+
+        (destination / "command.txt").write_text(command + "\n")
+        (destination / "offer.sdp").write_text(result.get("offer", ""))
+        (destination / "answer.sdp").write_text(result.get("answer", ""))
+        write_json(destination / "scenario.json", scenario.__dict__)
+        version_data = versions(baresip, libre)
+        version_data["pion"] = result.get("pionVersion", "unknown")
+        write_json(destination / "versions.json", version_data)
+        write_json(
+            destination / "process.json",
+            {
+                "expectedSignal": signal.SIGKILL,
+                "returncode": returncode,
+                "sessionId": result.get("sessionId"),
+            },
+        )
+        write_json(
+            destination / "resources.json",
+            {"baseline": baseline, "final": final},
+        )
+        verdict = Verdict.FAIL if failures else Verdict.PASS
+        write_json(
+            destination / "result.json",
+            {"verdict": verdict, "failures": failures},
+        )
+        return verdict
+    except Exception as error:
+        write_json(
+            destination / "result.json",
+            {
+                "verdict": Verdict.INFRA_ERROR,
+                "failures": [f"{type(error).__name__}: {error}"],
+            },
+        )
+        return Verdict.INFRA_ERROR
+    finally:
+        await endpoint.close()
+
+
 def calibrate_product_oracle() -> dict[str, str]:
     scenario = PRODUCT_SCENARIOS[0]
     values = list(payloads()[:3])

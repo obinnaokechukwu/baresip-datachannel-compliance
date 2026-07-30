@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -30,6 +31,7 @@ type request struct {
 	TURNUsername   string    `json:"turnUsername"`
 	TURNCredential string    `json:"turnCredential"`
 	ForceRelay     bool      `json:"forceRelay"`
+	AbortAfterOpen bool      `json:"abortAfterOpen"`
 }
 
 type description struct {
@@ -50,6 +52,7 @@ type result struct {
 	LocalCandidateType  string    `json:"localCandidateType"`
 	RemoteCandidateType string    `json:"remoteCandidateType"`
 	SelectedPair        string    `json:"selectedPair"`
+	SessionID           string    `json:"sessionId"`
 }
 
 func pionVersion() string {
@@ -161,7 +164,9 @@ func run(input request) (output result) {
 		output.Failures = []string{err.Error()}
 		return output
 	}
-	defer pc.Close()
+	if !input.AbortAfterOpen {
+		defer pc.Close()
+	}
 
 	channel, err := pc.CreateDataChannel(input.Label, nil)
 	if err != nil {
@@ -213,7 +218,10 @@ func run(input request) (output result) {
 
 	client := &http.Client{Timeout: 45 * time.Second}
 	sessionID, answer, err := signal(ctx, client, input, *local)
-	defer deleteSession(client, input.BaseURL, sessionID)
+	output.SessionID = sessionID
+	if !input.AbortAfterOpen {
+		defer deleteSession(client, input.BaseURL, sessionID)
+	}
 	if err != nil {
 		output.Failures = []string{err.Error()}
 		return output
@@ -232,6 +240,22 @@ func run(input request) (output result) {
 	case <-opened:
 	case <-ctx.Done():
 		output.Failures = []string{"data channel open timed out"}
+		return output
+	}
+	output.ConnectionState = pc.ConnectionState().String()
+	output.ICEState = pc.ICEConnectionState().String()
+	output.ChannelState = channel.ReadyState().String()
+	pair, err := pc.SCTP().Transport().ICETransport().
+		GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		output.Failures = []string{"selected ICE pair unavailable"}
+		return output
+	}
+	output.LocalCandidateType = pair.Local.Typ.String()
+	output.RemoteCandidateType = pair.Remote.Typ.String()
+	output.SelectedPair = pair.String()
+	if input.AbortAfterOpen {
+		output.Verdict = "PASS"
 		return output
 	}
 	for _, item := range input.Messages {
@@ -257,18 +281,6 @@ func run(input request) (output result) {
 		output.Failures = []string{"echo receipt timed out"}
 		return output
 	}
-	output.ConnectionState = pc.ConnectionState().String()
-	output.ICEState = pc.ICEConnectionState().String()
-	output.ChannelState = channel.ReadyState().String()
-	pair, err := pc.SCTP().Transport().ICETransport().
-		GetSelectedCandidatePair()
-	if err != nil || pair == nil {
-		output.Failures = []string{"selected ICE pair unavailable"}
-		return output
-	}
-	output.LocalCandidateType = pair.Local.Typ.String()
-	output.RemoteCandidateType = pair.Remote.Typ.String()
-	output.SelectedPair = pair.String()
 	output.Verdict = "PASS"
 	return output
 }
@@ -285,6 +297,11 @@ func main() {
 	output := run(input)
 	if err = json.NewEncoder(os.Stdout).Encode(output); err != nil {
 		panic(err)
+	}
+	if input.AbortAfterOpen && output.Verdict == "PASS" {
+		if err = syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+			panic(err)
+		}
 	}
 	if output.Verdict != "PASS" {
 		os.Exit(1)

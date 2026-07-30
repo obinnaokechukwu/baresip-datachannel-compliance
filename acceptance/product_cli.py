@@ -10,6 +10,7 @@ from .evidence import write_json
 from .model import Verdict
 from .product import (
     PRODUCT_SCENARIOS,
+    run_abrupt_peer_death,
     calibrate_product_oracle,
     run_parallel_sessions,
     run_pion_scenario,
@@ -75,6 +76,17 @@ async def run(args: argparse.Namespace) -> int:
         turn_server=args.turn_server.resolve(),
         forced_relay=True,
         impairment=True,
+    )
+    verdicts["baresip-pion-abrupt-peer-death"] = (
+        await run_abrupt_peer_death(
+            evidence,
+            args.executable.resolve(),
+            args.pion_endpoint.resolve(),
+            args.baresip.resolve(),
+            args.libre.resolve(),
+            library_paths,
+            command,
+        )
     )
     verdicts["baresip-aiortc-lifecycle-campaign"] = (
         await run_lifecycle_campaign(
