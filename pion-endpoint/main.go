@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -32,6 +33,7 @@ type request struct {
 	TURNCredential string    `json:"turnCredential"`
 	ForceRelay     bool      `json:"forceRelay"`
 	AbortAfterOpen bool      `json:"abortAfterOpen"`
+	HostIP         string    `json:"hostIp"`
 }
 
 type description struct {
@@ -159,7 +161,14 @@ func run(input request) (output result) {
 	if input.ForceRelay {
 		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
 	}
-	pc, err := webrtc.NewPeerConnection(config)
+	settingEngine := webrtc.SettingEngine{}
+	if input.HostIP != "" {
+		settingEngine.SetIPFilter(func(ip net.IP) bool {
+			return ip.String() == input.HostIP
+		})
+	}
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
+	pc, err := api.NewPeerConnection(config)
 	if err != nil {
 		output.Failures = []string{err.Error()}
 		return output

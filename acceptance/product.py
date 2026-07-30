@@ -929,19 +929,19 @@ async def run_pion_scenario(
     turn_password = "acceptance"
 
     try:
+        route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            route.connect(("192.0.2.1", 9))
+            host_ip = route.getsockname()[0]
+        finally:
+            route.close()
         if forced_relay:
             if turn_server is None:
                 raise RuntimeError("forced relay requires a TURN server")
-            route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                route.connect(("192.0.2.1", 9))
-                relay_ip = route.getsockname()[0]
-            finally:
-                route.close()
             turn_arguments = [
                 str(turn_server),
                 "-public-ip",
-                relay_ip,
+                host_ip,
                 "-username",
                 turn_username,
                 "-password",
@@ -1007,6 +1007,7 @@ async def run_pion_scenario(
             "turnUsername": turn_username,
             "turnCredential": turn_password,
             "forceRelay": forced_relay,
+            "hostIp": host_ip,
         }
         stdout, stderr = await asyncio.wait_for(
             process.communicate(json.dumps(request).encode()), 75.0
