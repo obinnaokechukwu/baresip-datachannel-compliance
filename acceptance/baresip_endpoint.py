@@ -125,6 +125,28 @@ class BaresipEndpoint:
             raise RuntimeError("baresip returned an invalid SDP answer")
         return answer
 
+    async def offer(self, *, media: bool) -> dict[str, str]:
+        self._check_process()
+        route = "/connect/avdata" if media else "/connect/data"
+        headers, body = await asyncio.to_thread(
+            self._request, "POST", route
+        )
+        self._session_id = headers.get("Session-ID")
+        if not self._session_id:
+            raise RuntimeError("baresip signaling response lacks Session-ID")
+        offer = json.loads(body)
+        if offer.get("type") != "offer" or not offer.get("sdp"):
+            raise RuntimeError("baresip returned an invalid SDP offer")
+        return offer
+
+    async def set_answer(self, answer: dict[str, str]) -> None:
+        if self._session_id is None:
+            raise RuntimeError("baresip has no active signaling session")
+        await asyncio.to_thread(
+            self._request, "PUT", "/sdp", answer, self._session_id
+        )
+        self._check_process()
+
     async def delete_session(self) -> None:
         if self._session_id is None:
             return

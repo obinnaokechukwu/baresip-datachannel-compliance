@@ -23,10 +23,17 @@ class ProductScenario:
     peer: str
     media: bool
     malformed: bool = False
+    baresip_offerer: bool = False
 
 
 PRODUCT_SCENARIOS = (
     ProductScenario("baresip-aiortc-data-only", "aiortc", False),
+    ProductScenario(
+        "baresip-offerer-aiortc-data-only",
+        "aiortc",
+        False,
+        baresip_offerer=True,
+    ),
     ProductScenario(
         "baresip-aiortc-malformed-input", "aiortc", False, True
     ),
@@ -217,7 +224,11 @@ async def run_product_scenario(
         if scenario.malformed
         else list(payloads())
     )
-    channel = f"{scenario.peer}-acceptance"
+    channel = (
+        "baresip-acceptance"
+        if scenario.baresip_offerer
+        else f"{scenario.peer}-acceptance"
+    )
     peer: AiortcEndpoint | ChromiumEndpoint
 
     if scenario.peer == "aiortc":
@@ -228,23 +239,30 @@ async def run_product_scenario(
     try:
         await endpoint.start()
         if isinstance(peer, AiortcEndpoint):
-            data_channel = peer.pc.createDataChannel(
-                channel, protocol="baresip-acceptance-v1"
-            )
-            peer._register(data_channel)
-            await peer.pc.setLocalDescription(await peer.pc.createOffer())
-            await peer._wait_ice_complete()
-            assert peer.pc.localDescription is not None
-            offer = {
-                "type": peer.pc.localDescription.type,
-                "sdp": peer.pc.localDescription.sdp,
-            }
-            answer = await endpoint.answer(offer, media=False)
-            await peer.pc.setRemoteDescription(
-                RTCSessionDescription(
-                    sdp=answer["sdp"], type=answer["type"]
+            if scenario.baresip_offerer:
+                offer = await endpoint.offer(media=scenario.media)
+                answer = await peer.answer(offer)
+                await endpoint.set_answer(answer)
+            else:
+                data_channel = peer.pc.createDataChannel(
+                    channel, protocol="baresip-acceptance-v1"
                 )
-            )
+                peer._register(data_channel)
+                await peer.pc.setLocalDescription(await peer.pc.createOffer())
+                await peer._wait_ice_complete()
+                assert peer.pc.localDescription is not None
+                offer = {
+                    "type": peer.pc.localDescription.type,
+                    "sdp": peer.pc.localDescription.sdp,
+                }
+                answer = await endpoint.answer(
+                    offer, media=scenario.media
+                )
+                await peer.pc.setRemoteDescription(
+                    RTCSessionDescription(
+                        sdp=answer["sdp"], type=answer["type"]
+                    )
+                )
             await peer.wait_channel_open(channel, 30.0)
             if scenario.malformed:
                 events, actual_values, malformed_failures = (
