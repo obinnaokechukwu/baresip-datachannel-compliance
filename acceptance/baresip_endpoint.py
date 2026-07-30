@@ -4,9 +4,12 @@ import asyncio
 import json
 import os
 import socket
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 
 class BaresipEndpoint:
@@ -114,6 +117,16 @@ class BaresipEndpoint:
                 f"baresip endpoint exited with {self._process.returncode}"
             )
 
+    def resource_snapshot(self) -> dict[str, int]:
+        self._check_process()
+        assert self._process is not None
+        process = psutil.Process(self._process.pid)
+        return {
+            "rssBytes": process.memory_info().rss,
+            "fileDescriptors": process.num_fds(),
+            "threads": process.num_threads(),
+        }
+
     async def answer(
         self,
         offer: dict[str, str],
@@ -205,10 +218,16 @@ class BaresipEndpoint:
         session_id, self._session_id = self._session_id, None
         await self.delete_session_id(session_id)
 
-    async def delete_session_id(self, session_id: str) -> None:
-        await asyncio.to_thread(
-            self._request, "DELETE", "/connect", None, session_id
-        )
+    async def delete_session_id(
+        self, session_id: str, *, missing_ok: bool = False
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self._request, "DELETE", "/connect", None, session_id
+            )
+        except urllib.error.HTTPError as error:
+            if not (missing_ok and error.code == 404):
+                raise
 
     async def close(self) -> None:
         try:

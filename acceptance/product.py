@@ -5,6 +5,7 @@ import json
 import signal
 import socket
 import struct
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -639,7 +640,7 @@ async def run_parallel_sessions(
     finally:
         for session_id in session_ids:
             try:
-                await endpoint.delete_session_id(session_id)
+                await endpoint.delete_session_id(session_id, missing_ok=True)
             except Exception:
                 pass
         await asyncio.gather(
@@ -875,6 +876,173 @@ async def run_pion_scenario(
                 turn_process.terminate()
             _, turn_stderr = await turn_process.communicate()
             (destination / "turn-server.log").write_bytes(turn_stderr)
+
+
+async def run_lifecycle_campaign(
+    evidence_root: Path,
+    executable: Path,
+    baresip: Path,
+    libre: Path,
+    library_paths: tuple[Path, ...],
+    command: str,
+    cycles: int,
+) -> Verdict:
+    scenario = ProductScenario(
+        "baresip-aiortc-lifecycle-campaign", "aiortc", False
+    )
+    destination = evidence_root / scenario.name
+    destination.mkdir(parents=True, exist_ok=True)
+    endpoint = BaresipEndpoint(
+        executable, baresip, library_paths, destination / "baresip.log"
+    )
+    failures: list[str] = []
+    sent: list[MessageRecord] = []
+    received: list[MessageRecord] = []
+    samples: list[dict[str, Any]] = []
+    teardown_budget = 5.0
+    rss_growth_budget = 32 * 1024 * 1024
+    fd_growth_budget = 4
+    thread_growth_budget = 2
+
+    try:
+        if cycles <= 0:
+            raise ValueError("lifecycle cycles must be positive")
+        await endpoint.start()
+        baseline = endpoint.resource_snapshot()
+        samples.append({"cycle": -1, **baseline})
+        for cycle in range(cycles):
+            peer = AiortcEndpoint()
+            session_id: str | None = None
+            label = f"lifecycle-{cycle}"
+            payload = cycle.to_bytes(4, "big")
+            values = [("binary", payload)]
+            started = time.monotonic()
+            try:
+                channel = peer.pc.createDataChannel(label)
+                peer._register(channel)
+                await peer.pc.setLocalDescription(await peer.pc.createOffer())
+                await peer._wait_ice_complete()
+                assert peer.pc.localDescription is not None
+                offer = {
+                    "type": peer.pc.localDescription.type,
+                    "sdp": peer.pc.localDescription.sdp,
+                }
+                session_id, answer = await endpoint.answer_session(
+                    offer, media=False
+                )
+                await peer.set_remote_description(answer)
+                await peer.wait_channel_open(label, 30.0)
+                await peer.send(label, "binary", payload)
+                _, actual = await wait_for_messages(
+                    peer.drain_events, 1, label, 15.0
+                )
+                association = f"baresip-{cycle}"
+                sent.extend(records(scenario, label, values, association))
+                received.extend(
+                    records(scenario, label, actual, association)
+                )
+
+                teardown_started = time.monotonic()
+                if cycle % 2 == 0:
+                    channel.close()
+
+                    async def wait_closed() -> None:
+                        while channel.readyState != "closed":
+                            await asyncio.sleep(0.01)
+
+                    await asyncio.wait_for(wait_closed(), teardown_budget)
+                else:
+                    await peer.close()
+                await endpoint.delete_session_id(
+                    session_id, missing_ok=cycle % 2 != 0
+                )
+                session_id = None
+                teardown_elapsed = time.monotonic() - teardown_started
+                if teardown_elapsed > teardown_budget:
+                    failures.append(
+                        f"cycle {cycle} teardown exceeded "
+                        f"{teardown_budget:.0f} seconds"
+                    )
+            finally:
+                if session_id is not None:
+                    try:
+                        await endpoint.delete_session_id(
+                            session_id, missing_ok=True
+                        )
+                    except Exception:
+                        pass
+                await peer.close()
+
+            elapsed = time.monotonic() - started
+            if elapsed > 45.0:
+                failures.append(
+                    f"cycle {cycle} exceeded 45-second total budget"
+                )
+            snapshot = endpoint.resource_snapshot()
+            samples.append(
+                {
+                    "cycle": cycle,
+                    "totalSeconds": elapsed,
+                    "teardownSeconds": teardown_elapsed,
+                    **snapshot,
+                }
+            )
+
+        failures.extend(compare_ordered(sent, received).failures)
+        final = samples[-1]
+        if final["rssBytes"] - baseline["rssBytes"] > rss_growth_budget:
+            failures.append("Baresip RSS growth exceeded 32 MiB")
+        if (
+            final["fileDescriptors"] - baseline["fileDescriptors"]
+            > fd_growth_budget
+        ):
+            failures.append("Baresip file-descriptor growth exceeded 4")
+        if final["threads"] - baseline["threads"] > thread_growth_budget:
+            failures.append("Baresip thread growth exceeded 2")
+
+        await endpoint.close()
+        log = (destination / "baresip.log").read_text(errors="replace")
+        if log.count("connectivity check is complete") < cycles:
+            failures.append("lifecycle log lacks ICE completions")
+        if log.count("verified sha-256 fingerprint OK") < cycles:
+            failures.append("lifecycle log lacks DTLS verifications")
+
+        (destination / "command.txt").write_text(command + "\n")
+        write_json(destination / "scenario.json", scenario.__dict__)
+        write_json(destination / "versions.json", versions(baresip, libre))
+        write_json(
+            destination / "budgets.json",
+            {
+                "cycles": cycles,
+                "teardownSeconds": teardown_budget,
+                "rssGrowthBytes": rss_growth_budget,
+                "fileDescriptorGrowth": fd_growth_budget,
+                "threadGrowth": thread_growth_budget,
+            },
+        )
+        write_json(destination / "resource-samples.json", samples)
+        write_json(destination / "sent-manifest.json", [x.json() for x in sent])
+        write_json(
+            destination / "received-manifest.json",
+            [x.json() for x in received],
+        )
+        verdict = Verdict.FAIL if failures else Verdict.PASS
+        write_json(
+            destination / "result.json",
+            {"verdict": verdict, "failures": failures},
+        )
+        return verdict
+    except Exception as error:
+        write_json(
+            destination / "result.json",
+            {
+                "verdict": Verdict.INFRA_ERROR,
+                "failures": [f"{type(error).__name__}: {error}"],
+            },
+        )
+        return Verdict.INFRA_ERROR
+    finally:
+        await endpoint.close()
 
 
 def calibrate_product_oracle() -> dict[str, str]:

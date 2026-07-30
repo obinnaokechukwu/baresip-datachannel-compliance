@@ -13,6 +13,7 @@ from .product import (
     calibrate_product_oracle,
     run_parallel_sessions,
     run_pion_scenario,
+    run_lifecycle_campaign,
     run_product_scenario,
 )
 
@@ -75,6 +76,17 @@ async def run(args: argparse.Namespace) -> int:
         forced_relay=True,
         impairment=True,
     )
+    verdicts["baresip-aiortc-lifecycle-campaign"] = (
+        await run_lifecycle_campaign(
+            evidence,
+            args.executable.resolve(),
+            args.baresip.resolve(),
+            args.libre.resolve(),
+            library_paths,
+            command,
+            args.lifecycle_cycles,
+        )
+    )
     calibration = calibrate_product_oracle()
     write_json(evidence / "oracle-calibration.json", calibration)
     calibrated = (
@@ -119,6 +131,7 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".work/turn-server"),
     )
+    result.add_argument("--lifecycle-cycles", type=int, default=20)
     result.add_argument("--library-path", type=Path, action="append", default=[])
     result.add_argument("--evidence", type=Path, required=True)
     return result
