@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "baresip-datachannel-acceptance"
+version = "0.1.0"
+description = "External black-box acceptance harness for baresip data channels"
+requires-python = ">=3.11"
+dependencies = [
+  "aiortc==1.15.0",
+  "playwright==1.54.0",
+  "psutil==7.0.0",
+  "PyYAML==6.0.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.1", "pytest-asyncio==1.1.0"]
+
+[project.scripts]
+dc-acceptance = "acceptance.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["acceptance*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

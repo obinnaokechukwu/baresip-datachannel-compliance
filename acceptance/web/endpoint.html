@@ -1,0 +1,172 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Chromium WebRTC endpoint</title>
+<script>
+"use strict";
+
+const state = {
+  pc: null,
+  channels: new Map(),
+  events: [],
+  media: [],
+};
+
+function emit(name, body = {}) {
+  state.events.push({name, body, at: new Date().toISOString()});
+}
+
+function registerChannel(channel) {
+  channel.binaryType = "arraybuffer";
+  state.channels.set(channel.label, channel);
+  channel.onopen = () => emit("channel", {
+    label: channel.label, id: channel.id, state: channel.readyState
+  });
+  channel.onclose = () => emit("channel", {
+    label: channel.label, id: channel.id, state: channel.readyState
+  });
+  channel.onerror = event => emit("error", {
+    source: "datachannel", message: String(event.error || event)
+  });
+  channel.onmessage = event => {
+    const binary = typeof event.data !== "string";
+    const bytes = binary
+      ? new Uint8Array(event.data)
+      : new TextEncoder().encode(event.data);
+    emit("message", {
+      label: channel.label,
+      type: binary ? "binary" : "text",
+      payloadHex: Array.from(bytes, byte =>
+        byte.toString(16).padStart(2, "0")).join("")
+    });
+  };
+}
+
+async function waitIceComplete(pc) {
+  if (pc.iceGatheringState === "complete") {
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("ICE gathering timeout")), 15000);
+    const listener = () => {
+      if (pc.iceGatheringState === "complete") {
+        clearTimeout(timer);
+        pc.removeEventListener("icegatheringstatechange", listener);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", listener);
+  });
+}
+
+async function start(config) {
+  state.pc = new RTCPeerConnection({bundlePolicy: "max-bundle"});
+  state.pc.ondatachannel = event => registerChannel(event.channel);
+  state.pc.onconnectionstatechange = () => emit("ready", {
+    connectionState: state.pc.connectionState
+  });
+  if (config.media) {
+    const audio = new AudioContext();
+    const oscillator = audio.createOscillator();
+    const audioDestination = audio.createMediaStreamDestination();
+    oscillator.connect(audioDestination);
+    oscillator.start();
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 240;
+    const context = canvas.getContext("2d");
+    let frame = 0;
+    const timer = setInterval(() => {
+      context.fillStyle = frame++ % 2 ? "#204080" : "#802040";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }, 100);
+    const videoStream = canvas.captureStream(10);
+    for (const track of audioDestination.stream.getTracks()) {
+      state.pc.addTrack(track, audioDestination.stream);
+      state.media.push({track, oscillator, audio});
+    }
+    for (const track of videoStream.getTracks()) {
+      state.pc.addTrack(track, videoStream);
+      state.media.push({track, timer});
+    }
+  }
+  emit("ready", {connectionState: state.pc.connectionState});
+}
+
+async function createChannel(config) {
+  const channel = state.pc.createDataChannel(config.label, {
+    ordered: config.ordered,
+  });
+  registerChannel(channel);
+  return {label: channel.label, id: channel.id, state: channel.readyState};
+}
+
+async function createOffer() {
+  await state.pc.setLocalDescription(await state.pc.createOffer());
+  await waitIceComplete(state.pc);
+  return {
+    type: state.pc.localDescription.type,
+    sdp: state.pc.localDescription.sdp
+  };
+}
+
+async function setRemoteDescription(description) {
+  await state.pc.setRemoteDescription(description);
+}
+
+async function send(label, type, payloadHex) {
+  const channel = state.channels.get(label);
+  if (!channel || channel.readyState !== "open") {
+    throw new Error(`channel ${label} is not open`);
+  }
+  const bytes = new Uint8Array(
+    payloadHex.match(/../g)?.map(value => parseInt(value, 16)) || []
+  );
+  channel.send(type === "text" ? new TextDecoder().decode(bytes) : bytes);
+}
+
+async function stats() {
+  const rows = [];
+  for (const report of (await state.pc.getStats()).values()) {
+    if (["candidate-pair", "local-candidate", "remote-candidate",
+         "transport", "data-channel", "inbound-rtp", "outbound-rtp",
+         "peer-connection"].includes(report.type)) {
+      rows.push(JSON.parse(JSON.stringify(report)));
+    }
+  }
+  return {
+    connectionState: state.pc.connectionState,
+    iceConnectionState: state.pc.iceConnectionState,
+    signalingState: state.pc.signalingState,
+    rows,
+  };
+}
+
+async function close() {
+  for (const channel of state.channels.values()) {
+    channel.close();
+  }
+  if (state.pc) {
+    state.pc.close();
+  }
+  for (const item of state.media) {
+    item.track.stop();
+    if (item.timer) clearInterval(item.timer);
+    if (item.oscillator) item.oscillator.stop();
+    if (item.audio) await item.audio.close();
+  }
+  emit("closed", {});
+}
+
+window.endpoint = {
+  start,
+  createChannel,
+  createOffer,
+  setRemoteDescription,
+  send,
+  stats,
+  close,
+  drainEvents() {
+    return state.events.splice(0);
+  },
+};
+</script>
