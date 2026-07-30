@@ -24,6 +24,7 @@ class ProductScenario:
     baresip_offerer: bool = False
     late_local_open: bool = False
     audio_only: bool = False
+    simultaneous_open: bool = False
 
 
 PRODUCT_SCENARIOS = (
@@ -51,6 +52,12 @@ PRODUCT_SCENARIOS = (
         "aiortc",
         False,
         late_local_open=True,
+    ),
+    ProductScenario(
+        "baresip-aiortc-simultaneous-open",
+        "aiortc",
+        False,
+        simultaneous_open=True,
     ),
     ProductScenario(
         "baresip-aiortc-malformed-input", "aiortc", False, True
@@ -89,11 +96,14 @@ def records(
     ]
 
 
-def received_values(events: list[dict[str, Any]]) -> list[tuple[str, bytes]]:
+def received_values(
+    events: list[dict[str, Any]], label: str | None = None
+) -> list[tuple[str, bytes]]:
     return [
         (event["body"]["type"], bytes.fromhex(event["body"]["payloadHex"]))
         for event in events
         if event["name"] == "message"
+        and (label is None or event["body"].get("label") == label)
     ]
 
 
@@ -112,14 +122,17 @@ def rejected_message_failures(
 
 
 async def wait_for_messages(
-    drain: Any, count: int, timeout: float = 15.0
+    drain: Any,
+    count: int,
+    label: str | None = None,
+    timeout: float = 15.0,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, bytes]]]:
     events: list[dict[str, Any]] = []
 
     async def wait() -> list[tuple[str, bytes]]:
         while True:
             events.extend(await drain())
-            values = received_values(events)
+            values = received_values(events, label)
             if len(values) >= count:
                 return values
             await asyncio.sleep(0.05)
@@ -249,6 +262,8 @@ async def run_product_scenario(
         if scenario.malformed
         else list(payloads())
     )
+    expected_by_channel: dict[str, list[tuple[str, bytes]]] = {}
+    actual_by_channel: dict[str, list[tuple[str, bytes]]] = {}
     channel = (
         "baresip-acceptance"
         if scenario.baresip_offerer
@@ -300,17 +315,42 @@ async def run_product_scenario(
                 channel = "baresip-late-open"
                 await endpoint.create_datachannel(channel)
                 await peer.wait_channel_open(channel, 30.0)
+            channels = [channel]
+            if scenario.simultaneous_open:
+                remote_label = "aiortc-simultaneous"
+                local_label = "baresip-simultaneous"
+                create_local = asyncio.create_task(
+                    endpoint.create_datachannel(local_label)
+                )
+                remote_channel = peer.pc.createDataChannel(remote_label)
+                peer._register(remote_channel)
+                await create_local
+                await asyncio.gather(
+                    peer.wait_channel_open(remote_label, 30.0),
+                    peer.wait_channel_open(local_label, 30.0),
+                )
+                channels.extend((remote_label, local_label))
             if scenario.malformed:
                 events, actual_values, malformed_failures = (
                     await exercise_malformed_inputs(peer, channel)
                 )
                 failures.extend(malformed_failures)
+                expected_by_channel[channel] = expected_values
+                actual_by_channel[channel] = actual_values
             else:
-                for message_type, payload in expected_values:
-                    await peer.send(channel, message_type, payload)
-                events, actual_values = await wait_for_messages(
-                    peer.drain_events, len(expected_values)
-                )
+                for active_channel in channels:
+                    expected_by_channel[active_channel] = expected_values
+                    for message_type, payload in expected_values:
+                        await peer.send(
+                            active_channel, message_type, payload
+                        )
+                    more_events, actual_values = await wait_for_messages(
+                        peer.drain_events,
+                        len(expected_values),
+                        active_channel,
+                    )
+                    events.extend(more_events)
+                    actual_by_channel[active_channel] = actual_values
             stats = await peer.stats()
             if stats.get("dtlsState") != "connected":
                 failures.append("aiortc DTLS is not connected")
@@ -339,8 +379,10 @@ async def run_product_scenario(
             for message_type, payload in expected_values:
                 await peer.send(channel, message_type, payload)
             events, actual_values = await wait_for_messages(
-                peer.events, len(expected_values)
+                peer.events, len(expected_values), channel
             )
+            expected_by_channel[channel] = expected_values
+            actual_by_channel[channel] = actual_values
             await asyncio.sleep(1.0)
             stats = await peer.stats()
             if stats.get("connectionState") != "connected":
@@ -356,8 +398,20 @@ async def run_product_scenario(
                     f"Chromium lacks received audio/video: {received_kinds}"
                 )
 
-        sent = records(scenario, channel, expected_values)
-        received = records(scenario, channel, actual_values)
+        sent = [
+            record
+            for active_channel, values in expected_by_channel.items()
+            for record in records(
+                scenario, active_channel, values
+            )
+        ]
+        received = [
+            record
+            for active_channel, values in actual_by_channel.items()
+            for record in records(
+                scenario, active_channel, values
+            )
+        ]
         failures.extend(compare_ordered(sent, received).failures)
         assert offer is not None and answer is not None
         failures.extend(check_sdp(scenario, offer["sdp"], answer["sdp"]))
