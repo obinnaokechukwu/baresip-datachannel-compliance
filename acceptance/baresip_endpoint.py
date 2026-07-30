@@ -111,6 +111,19 @@ class BaresipEndpoint:
         media: bool,
         audio_only: bool = False,
     ) -> dict[str, str]:
+        session_id, answer = await self.answer_session(
+            offer, media=media, audio_only=audio_only
+        )
+        self._session_id = session_id
+        return answer
+
+    async def answer_session(
+        self,
+        offer: dict[str, str],
+        *,
+        media: bool,
+        audio_only: bool = False,
+    ) -> tuple[str, dict[str, str]]:
         self._check_process()
         route = (
             "/connect/offerer/audiodata"
@@ -122,17 +135,17 @@ class BaresipEndpoint:
         headers, _ = await asyncio.to_thread(
             self._request, "POST", route
         )
-        self._session_id = headers.get("Session-ID")
-        if not self._session_id:
+        session_id = headers.get("Session-ID")
+        if not session_id:
             raise RuntimeError("baresip signaling response lacks Session-ID")
         _, body = await asyncio.to_thread(
-            self._request, "PUT", "/sdp", offer, self._session_id
+            self._request, "PUT", "/sdp", offer, session_id
         )
         self._check_process()
         answer = json.loads(body)
         if answer.get("type") != "answer" or not answer.get("sdp"):
             raise RuntimeError("baresip returned an invalid SDP answer")
-        return answer
+        return session_id, answer
 
     async def offer(
         self, *, media: bool, audio_only: bool = False
@@ -180,6 +193,9 @@ class BaresipEndpoint:
         if self._session_id is None:
             return
         session_id, self._session_id = self._session_id, None
+        await self.delete_session_id(session_id)
+
+    async def delete_session_id(self, session_id: str) -> None:
         await asyncio.to_thread(
             self._request, "DELETE", "/connect", None, session_id
         )

@@ -81,11 +81,12 @@ def records(
     scenario: ProductScenario,
     channel: str,
     values: list[tuple[str, bytes]],
+    association: str = "baresip",
 ) -> list[MessageRecord]:
     return [
         MessageRecord.from_payload(
             run=scenario.name,
-            association="baresip",
+            association=association,
             channel=channel,
             direction=f"{scenario.peer}-baresip-echo",
             sequence=sequence,
@@ -461,6 +462,147 @@ async def run_product_scenario(
         return Verdict.INFRA_ERROR
     finally:
         await peer.close()
+        await endpoint.close()
+
+
+async def run_parallel_sessions(
+    evidence_root: Path,
+    executable: Path,
+    baresip: Path,
+    libre: Path,
+    library_paths: tuple[Path, ...],
+    command: str,
+    count: int = 4,
+) -> Verdict:
+    scenario = ProductScenario(
+        "baresip-aiortc-parallel-sessions", "aiortc", False
+    )
+    destination = evidence_root / scenario.name
+    destination.mkdir(parents=True, exist_ok=True)
+    endpoint = BaresipEndpoint(
+        executable, baresip, library_paths, destination / "baresip.log"
+    )
+    peers = [AiortcEndpoint() for _ in range(count)]
+    session_ids: list[str] = []
+    failures: list[str] = []
+    sent: list[MessageRecord] = []
+    received: list[MessageRecord] = []
+    all_events: list[dict[str, Any]] = []
+    all_stats: list[dict[str, Any]] = []
+    values = list(payloads()[:4])
+
+    try:
+        await endpoint.start()
+        offers: list[dict[str, str]] = []
+        for index, peer in enumerate(peers):
+            label = f"parallel-{index}"
+            channel = peer.pc.createDataChannel(label)
+            peer._register(channel)
+            await peer.pc.setLocalDescription(await peer.pc.createOffer())
+            offers.append({})
+
+        await asyncio.gather(*(peer._wait_ice_complete() for peer in peers))
+        for index, peer in enumerate(peers):
+            assert peer.pc.localDescription is not None
+            offers[index] = {
+                "type": peer.pc.localDescription.type,
+                "sdp": peer.pc.localDescription.sdp,
+            }
+
+        sessions = await asyncio.gather(
+            *(
+                endpoint.answer_session(offer, media=False)
+                for offer in offers
+            )
+        )
+        session_ids.extend(session_id for session_id, _ in sessions)
+        await asyncio.gather(
+            *(
+                peer.set_remote_description(answer)
+                for peer, (_, answer) in zip(peers, sessions, strict=True)
+            )
+        )
+        await asyncio.gather(
+            *(
+                peer.wait_channel_open(f"parallel-{index}", 30.0)
+                for index, peer in enumerate(peers)
+            )
+        )
+
+        for index, peer in enumerate(peers):
+            label = f"parallel-{index}"
+            association = f"baresip-{index}"
+            for message_type, payload in values:
+                await peer.send(label, message_type, payload)
+            events, actual = await wait_for_messages(
+                peer.drain_events, len(values), label, 30.0
+            )
+            all_events.extend(
+                {"peer": index, **event} for event in events
+            )
+            sent.extend(records(scenario, label, values, association))
+            received.extend(
+                records(scenario, label, actual, association)
+            )
+            stats = await peer.stats()
+            all_stats.append({"peer": index, **stats})
+            if stats.get("dtlsState") != "connected":
+                failures.append(f"peer {index} DTLS is not connected")
+            if stats.get("sctpState") != "connected":
+                failures.append(f"peer {index} SCTP is not connected")
+
+        failures.extend(compare_ordered(sent, received).failures)
+        await asyncio.gather(
+            *(endpoint.delete_session_id(value) for value in session_ids)
+        )
+        session_ids.clear()
+        await endpoint.close()
+
+        log = (destination / "baresip.log").read_text(errors="replace")
+        if log.count("connectivity check is complete") < count:
+            failures.append("baresip log lacks parallel ICE completions")
+        if log.count("verified sha-256 fingerprint OK") < count:
+            failures.append("baresip log lacks parallel DTLS verification")
+
+        (destination / "command.txt").write_text(command + "\n")
+        write_json(destination / "scenario.json", scenario.__dict__)
+        write_json(destination / "versions.json", versions(baresip, libre))
+        write_json(destination / "peer-stats.json", all_stats)
+        write_json(destination / "sent-manifest.json", [x.json() for x in sent])
+        write_json(
+            destination / "received-manifest.json",
+            [x.json() for x in received],
+        )
+        (destination / "events.ndjson").write_text(
+            "".join(
+                json.dumps(event, sort_keys=True) + "\n"
+                for event in all_events
+            )
+        )
+        verdict = Verdict.FAIL if failures else Verdict.PASS
+        write_json(
+            destination / "result.json",
+            {"verdict": verdict, "failures": failures},
+        )
+        return verdict
+    except Exception as error:
+        write_json(
+            destination / "result.json",
+            {
+                "verdict": Verdict.INFRA_ERROR,
+                "failures": [f"{type(error).__name__}: {error}"],
+            },
+        )
+        return Verdict.INFRA_ERROR
+    finally:
+        for session_id in session_ids:
+            try:
+                await endpoint.delete_session_id(session_id)
+            except Exception:
+                pass
+        await asyncio.gather(
+            *(peer.close() for peer in peers), return_exceptions=True
+        )
         await endpoint.close()
 
 

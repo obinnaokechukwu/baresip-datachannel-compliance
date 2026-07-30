@@ -11,6 +11,7 @@ from .model import Verdict
 from .product import (
     PRODUCT_SCENARIOS,
     calibrate_product_oracle,
+    run_parallel_sessions,
     run_product_scenario,
 )
 
@@ -31,6 +32,16 @@ async def run(args: argparse.Namespace) -> int:
             library_paths,
             command,
         )
+    verdicts["baresip-aiortc-parallel-sessions"] = (
+        await run_parallel_sessions(
+            evidence,
+            args.executable.resolve(),
+            args.baresip.resolve(),
+            args.libre.resolve(),
+            library_paths,
+            command,
+        )
+    )
     calibration = calibrate_product_oracle()
     write_json(evidence / "oracle-calibration.json", calibration)
     calibrated = (
