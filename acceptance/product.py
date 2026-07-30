@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .aiortc_endpoint import AiortcEndpoint
+from .aiortc_endpoint import AiortcEndpoint, copy_application_attributes
 from .baresip_endpoint import BaresipEndpoint
 from .chromium import ChromiumEndpoint
 from .evidence import versions, write_json
@@ -31,6 +31,7 @@ class ProductScenario:
     ordered: bool = True
     max_retransmits: int | None = None
     max_packet_lifetime: int | None = None
+    negotiated: bool = False
 
 
 PRODUCT_SCENARIOS = (
@@ -66,6 +67,13 @@ PRODUCT_SCENARIOS = (
         "aiortc",
         False,
         baresip_offerer=True,
+    ),
+    ProductScenario(
+        "baresip-offerer-aiortc-rfc8864",
+        "aiortc",
+        False,
+        baresip_offerer=True,
+        negotiated=True,
     ),
     ProductScenario(
         "baresip-offerer-aiortc-avdata",
@@ -257,6 +265,13 @@ def check_sdp(scenario: ProductScenario, offer: str, answer: str) -> list[str]:
             failures.append(f"{name} lacks a=max-message-size")
         if "a=fingerprint:" not in description:
             failures.append(f"{name} lacks media-level fingerprint")
+        if scenario.negotiated:
+            expected = (
+                'a=dcmap:1 subprotocol="sdp-test";'
+                'label="baresip-acceptance"'
+            )
+            if expected not in description:
+                failures.append(f"{name} lacks negotiated dcmap")
     if scenario.media:
         mids = [
             line.removeprefix("a=mid:")
@@ -322,12 +337,25 @@ async def run_product_scenario(
                 offer = await endpoint.offer(
                     media=scenario.media,
                     audio_only=scenario.audio_only,
+                    negotiated=scenario.negotiated,
                 )
+                if scenario.negotiated:
+                    negotiated_channel = peer.pc.createDataChannel(
+                        channel,
+                        protocol="sdp-test",
+                        negotiated=True,
+                        id=1,
+                    )
+                    peer._register(negotiated_channel)
                 answer = await peer.answer(
                     offer,
                     media=scenario.media,
                     audio_only=scenario.audio_only,
                 )
+                if scenario.negotiated:
+                    answer["sdp"] = copy_application_attributes(
+                        offer["sdp"], answer["sdp"], ("dcmap", "dcsa")
+                    )
                 await endpoint.set_answer(answer)
             else:
                 if scenario.media:
@@ -395,6 +423,11 @@ async def run_product_scenario(
                     events.extend(more_events)
                     actual_by_channel[active_channel] = actual_values
             stats = await peer.stats()
+            if scenario.negotiated:
+                stats["rfc8864SignalingAdapter"] = (
+                    "controller preserves dcmap/dcsa because aiortc does not "
+                    "model them; aiortc owns negotiated SCTP stream 1"
+                )
             if stats.get("dtlsState") != "connected":
                 failures.append("aiortc DTLS is not connected")
             if stats.get("sctpState") != "connected":

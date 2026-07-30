@@ -171,11 +171,17 @@ class BaresipEndpoint:
         return session_id, answer
 
     async def offer(
-        self, *, media: bool, audio_only: bool = False
+        self,
+        *,
+        media: bool,
+        audio_only: bool = False,
+        negotiated: bool = False,
     ) -> dict[str, str]:
         self._check_process()
         route = (
-            "/connect/audiodata"
+            "/connect/negotiated"
+            if negotiated
+            else "/connect/audiodata"
             if audio_only
             else "/connect/avdata"
             if media

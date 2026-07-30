@@ -82,6 +82,47 @@ def expand_bundle_transport_attributes(sdp: str) -> str:
     return rendered
 
 
+def copy_application_attributes(
+    source: str, target: str, names: tuple[str, ...]
+) -> str:
+    """Copy endpoint-app SDP attributes that aiortc does not model."""
+    prefixes = tuple(f"a={name}:" for name in names)
+
+    def application_attributes(sdp: str) -> list[str]:
+        result: list[str] = []
+        in_application = False
+        for line in sdp.replace("\r\n", "\n").splitlines():
+            if line.startswith("m="):
+                in_application = line.startswith("m=application ")
+            elif in_application and line.startswith(prefixes):
+                result.append(line)
+        return result
+
+    attributes = application_attributes(source)
+    if not attributes:
+        return target
+    newline = "\r\n" if "\r\n" in target else "\n"
+    lines = target.replace("\r\n", "\n").splitlines()
+    insertion = len(lines)
+    in_application = False
+    for index, line in enumerate(lines):
+        if line.startswith("m="):
+            if in_application:
+                insertion = index
+                break
+            in_application = line.startswith("m=application ")
+    if not in_application:
+        return target
+    existing = set(application_attributes(target))
+    lines[insertion:insertion] = [
+        line for line in attributes if line not in existing
+    ]
+    rendered = newline.join(lines)
+    if target.endswith(("\r\n", "\n")):
+        rendered += newline
+    return rendered
+
+
 class AiortcEndpoint:
     def __init__(self) -> None:
         self.pc = RTCPeerConnection()
