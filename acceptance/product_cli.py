@@ -63,6 +63,18 @@ async def run(args: argparse.Namespace) -> int:
         turn_server=args.turn_server.resolve(),
         forced_relay=True,
     )
+    verdicts["baresip-pion-turn-impairment"] = await run_pion_scenario(
+        evidence,
+        args.executable.resolve(),
+        args.pion_endpoint.resolve(),
+        args.baresip.resolve(),
+        args.libre.resolve(),
+        library_paths,
+        command,
+        turn_server=args.turn_server.resolve(),
+        forced_relay=True,
+        impairment=True,
+    )
     calibration = calibrate_product_oracle()
     write_json(evidence / "oracle-calibration.json", calibration)
     calibrated = (

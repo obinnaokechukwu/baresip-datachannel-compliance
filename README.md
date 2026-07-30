@@ -43,4 +43,7 @@ The independent Pion endpoint is built outside the Python environment:
 
 `dc-product-acceptance` uses `.work/pion-endpoint` and `.work/turn-server` by
 default. It records the resolved Pion module version and includes a relay-only
-TURN/UDP scenario whose selected local candidate must be `relay`.
+TURN/UDP scenario whose selected local candidate must be `relay`. A second
+relay run applies measured deterministic loss, delay, jitter, reordering,
+duplication, bandwidth limiting, and a 1400-byte datagram ceiling entirely
+inside the harness TURN server.

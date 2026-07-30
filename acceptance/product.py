@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 import socket
 import struct
 from dataclasses import dataclass
@@ -657,11 +658,16 @@ async def run_pion_scenario(
     command: str,
     turn_server: Path | None = None,
     forced_relay: bool = False,
+    impairment: bool = False,
 ) -> Verdict:
     scenario = ProductScenario(
-        "baresip-pion-forced-turn"
-        if forced_relay
-        else "baresip-pion-data-only",
+        (
+            "baresip-pion-turn-impairment"
+            if impairment
+            else "baresip-pion-forced-turn"
+            if forced_relay
+            else "baresip-pion-data-only"
+        ),
         "pion",
         False,
     )
@@ -686,7 +692,7 @@ async def run_pion_scenario(
                 relay_ip = route.getsockname()[0]
             finally:
                 route.close()
-            turn_process = await asyncio.create_subprocess_exec(
+            turn_arguments = [
                 str(turn_server),
                 "-public-ip",
                 relay_ip,
@@ -694,6 +700,28 @@ async def run_pion_scenario(
                 turn_username,
                 "-password",
                 turn_password,
+            ]
+            if impairment:
+                turn_arguments.extend(
+                    (
+                        "-drop-every",
+                        "29",
+                        "-reorder-every",
+                        "31",
+                        "-duplicate-every",
+                        "37",
+                        "-delay",
+                        "2ms",
+                        "-jitter",
+                        "2ms",
+                        "-bandwidth",
+                        "2000000",
+                        "-mtu",
+                        "1400",
+                    )
+                )
+            turn_process = await asyncio.create_subprocess_exec(
+                *turn_arguments,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -772,6 +800,24 @@ async def run_pion_scenario(
                 " typ relay " not in f" {line} " for line in candidates
             ):
                 failures.append("Pion offer was not relay-only")
+        if impairment:
+            assert turn_process is not None
+            assert turn_process.stdout is not None
+            turn_process.send_signal(signal.SIGUSR1)
+            metrics_line = await asyncio.wait_for(
+                turn_process.stdout.readline(), 10.0
+            )
+            metrics = json.loads(metrics_line)
+            write_json(destination / "turn-metrics.json", metrics)
+            for metric in ("dropped", "delayed", "reordered", "duplicated"):
+                if metrics.get(metric, 0) <= 0:
+                    failures.append(
+                        f"TURN impairment did not exercise {metric}"
+                    )
+            if metrics.get("bandwidthBitsPerSecond") != 2_000_000:
+                failures.append("TURN bandwidth limit was not active")
+            if metrics.get("mtu") != 1400:
+                failures.append("TURN MTU limit was not active")
 
         await endpoint.close()
         log = (destination / "baresip.log").read_text(errors="replace")
