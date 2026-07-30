@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+LIBRE=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--libre)
+			LIBRE=$2
+			shift 2
+			;;
+		*)
+			echo "unknown argument: $1" >&2
+			exit 2
+			;;
+	esac
+done
+
+if [ -z "$LIBRE" ]; then
+	echo "usage: $0 --libre PATH" >&2
+	exit 2
+fi
+
+BUILD="$ROOT/.work/libre-build"
+INSTALL="$ROOT/.work/install"
+PROBE_BUILD="$ROOT/.work/phase1"
+EVIDENCE="$ROOT/evidence/phase1"
+
+mkdir -p "$PROBE_BUILD" "$EVIDENCE"
+cmake -S "$LIBRE" -B "$BUILD" \
+	-DCMAKE_BUILD_TYPE=Debug \
+	-DCMAKE_INSTALL_PREFIX="$INSTALL" \
+	-DLIBRE_BUILD_SHARED=ON \
+	-DLIBRE_BUILD_STATIC=ON
+cmake --build "$BUILD" -j2
+cmake --install "$BUILD"
+
+PKG_CONFIG_PATH="$INSTALL/lib/pkgconfig" \
+	cc -std=c11 -pedantic -Wall -Wextra -Werror \
+		"$ROOT/probes/dtls_appdata.c" \
+		-o "$PROBE_BUILD/dtls_appdata" \
+		$(PKG_CONFIG_PATH="$INSTALL/lib/pkgconfig" \
+			pkg-config --cflags --libs libre)
+
+LD_LIBRARY_PATH="$INSTALL/lib" \
+	"$PROBE_BUILD/dtls_appdata" | tee "$EVIDENCE/dtls-appdata.json"
+git -C "$LIBRE" rev-parse HEAD >"$EVIDENCE/libre-revision.txt"
+cc --version | head -1 >"$EVIDENCE/compiler.txt"
+cmake --version | head -1 >"$EVIDENCE/cmake.txt"
