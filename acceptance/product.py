@@ -35,6 +35,12 @@ PRODUCT_SCENARIOS = (
         baresip_offerer=True,
     ),
     ProductScenario(
+        "baresip-offerer-aiortc-avdata",
+        "aiortc",
+        True,
+        baresip_offerer=True,
+    ),
+    ProductScenario(
         "baresip-aiortc-malformed-input", "aiortc", False, True
     ),
     ProductScenario("baresip-chromium-avdata", "chromium", True),
@@ -241,7 +247,7 @@ async def run_product_scenario(
         if isinstance(peer, AiortcEndpoint):
             if scenario.baresip_offerer:
                 offer = await endpoint.offer(media=scenario.media)
-                answer = await peer.answer(offer)
+                answer = await peer.answer(offer, media=scenario.media)
                 await endpoint.set_answer(answer)
             else:
                 data_channel = peer.pc.createDataChannel(
@@ -280,6 +286,18 @@ async def run_product_scenario(
                 failures.append("aiortc DTLS is not connected")
             if stats.get("sctpState") != "connected":
                 failures.append("aiortc SCTP is not connected")
+            if scenario.media:
+                received_kinds = {
+                    row.get("kind")
+                    for row in stats.get("rows", [])
+                    if row.get("type") == "inbound-rtp"
+                    and row.get("packetsReceived", 0) > 0
+                }
+                if received_kinds != {"audio", "video"}:
+                    failures.append(
+                        "aiortc lacks received audio/video: "
+                        f"{received_kinds}"
+                    )
         else:
             await peer.start(media=True)
             await peer.create_channel(channel)
@@ -347,7 +365,7 @@ async def run_product_scenario(
             {"verdict": verdict, "failures": failures},
         )
         return verdict
-    except (TimeoutError, asyncio.TimeoutError, RuntimeError) as error:
+    except Exception as error:
         write_json(
             destination / "result.json",
             {

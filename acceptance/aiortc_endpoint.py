@@ -3,7 +3,83 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from aiortc import RTCDataChannel, RTCPeerConnection, RTCSessionDescription
+from aiortc import (
+    AudioStreamTrack,
+    RTCDataChannel,
+    RTCPeerConnection,
+    RTCSessionDescription,
+    VideoStreamTrack,
+)
+
+
+def expand_bundle_transport_attributes(sdp: str) -> str:
+    """Work around aiortc requiring DTLS attributes on every BUNDLE member."""
+    newline = "\r\n" if "\r\n" in sdp else "\n"
+    lines = sdp.replace("\r\n", "\n").splitlines()
+    bundle: list[str] = []
+    sections: list[list[str]] = []
+    session: list[str] = []
+
+    for line in lines:
+        if line.startswith("a=group:BUNDLE "):
+            bundle = line.removeprefix("a=group:BUNDLE ").split()
+        if line.startswith("m="):
+            sections.append([line])
+        elif sections:
+            sections[-1].append(line)
+        else:
+            session.append(line)
+
+    if not bundle:
+        return sdp
+
+    by_mid = {
+        mid: section
+        for section in sections
+        if (
+            mid := next(
+                (
+                    line.removeprefix("a=mid:")
+                    for line in section
+                    if line.startswith("a=mid:")
+                ),
+                "",
+            )
+        )
+    }
+    tag = by_mid.get(bundle[0])
+    if not tag:
+        return sdp
+
+    attributes = [
+        line
+        for line in tag
+        if line.startswith(("a=setup:", "a=fingerprint:"))
+    ]
+    for mid in bundle[1:]:
+        section = by_mid.get(mid)
+        if not section:
+            continue
+        names = {line.partition(":")[0] for line in section}
+        insertion = next(
+            (
+                index + 1
+                for index, line in enumerate(section)
+                if line.startswith("a=mid:")
+            ),
+            1,
+        )
+        additions = [
+            line for line in attributes if line.partition(":")[0] not in names
+        ]
+        section[insertion:insertion] = additions
+
+    rendered = newline.join(
+        [*session, *(line for section in sections for line in section)]
+    )
+    if sdp.endswith(("\r\n", "\n")):
+        rendered += newline
+    return rendered
 
 
 class AiortcEndpoint:
@@ -73,10 +149,16 @@ class AiortcEndpoint:
                 }
             )
 
-    async def answer(self, offer: dict[str, str]) -> dict[str, str]:
+    async def answer(
+        self, offer: dict[str, str], *, media: bool = False
+    ) -> dict[str, str]:
+        remote_sdp = expand_bundle_transport_attributes(offer["sdp"])
         await self.pc.setRemoteDescription(
-            RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
+            RTCSessionDescription(sdp=remote_sdp, type=offer["type"])
         )
+        if media:
+            self.pc.addTrack(AudioStreamTrack())
+            self.pc.addTrack(VideoStreamTrack())
         await self.pc.setLocalDescription(await self.pc.createAnswer())
         await self._wait_ice_complete()
         assert self.pc.localDescription is not None
