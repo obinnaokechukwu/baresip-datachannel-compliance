@@ -105,11 +105,20 @@ class BaresipEndpoint:
             )
 
     async def answer(
-        self, offer: dict[str, str], *, media: bool
+        self,
+        offer: dict[str, str],
+        *,
+        media: bool,
+        audio_only: bool = False,
     ) -> dict[str, str]:
         self._check_process()
-        route = "/connect/offerer/avdata" if media else \
-            "/connect/offerer/data"
+        route = (
+            "/connect/offerer/audiodata"
+            if audio_only
+            else "/connect/offerer/avdata"
+            if media
+            else "/connect/offerer/data"
+        )
         headers, _ = await asyncio.to_thread(
             self._request, "POST", route
         )
@@ -125,9 +134,17 @@ class BaresipEndpoint:
             raise RuntimeError("baresip returned an invalid SDP answer")
         return answer
 
-    async def offer(self, *, media: bool) -> dict[str, str]:
+    async def offer(
+        self, *, media: bool, audio_only: bool = False
+    ) -> dict[str, str]:
         self._check_process()
-        route = "/connect/avdata" if media else "/connect/data"
+        route = (
+            "/connect/audiodata"
+            if audio_only
+            else "/connect/avdata"
+            if media
+            else "/connect/data"
+        )
         headers, body = await asyncio.to_thread(
             self._request, "POST", route
         )

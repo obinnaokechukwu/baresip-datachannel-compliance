@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aiortc import RTCSessionDescription
-
 from .aiortc_endpoint import AiortcEndpoint
 from .baresip_endpoint import BaresipEndpoint
 from .chromium import ChromiumEndpoint
@@ -25,10 +23,17 @@ class ProductScenario:
     malformed: bool = False
     baresip_offerer: bool = False
     late_local_open: bool = False
+    audio_only: bool = False
 
 
 PRODUCT_SCENARIOS = (
     ProductScenario("baresip-aiortc-data-only", "aiortc", False),
+    ProductScenario(
+        "baresip-aiortc-audiodata",
+        "aiortc",
+        True,
+        audio_only=True,
+    ),
     ProductScenario(
         "baresip-offerer-aiortc-data-only",
         "aiortc",
@@ -90,6 +95,12 @@ def received_values(events: list[dict[str, Any]]) -> list[tuple[str, bytes]]:
         for event in events
         if event["name"] == "message"
     ]
+
+
+def expected_media_kinds(scenario: ProductScenario) -> set[str]:
+    if not scenario.media:
+        return set()
+    return {"audio"} if scenario.audio_only else {"audio", "video"}
 
 
 def rejected_message_failures(
@@ -206,7 +217,8 @@ def check_sdp(scenario: ProductScenario, offer: str, answer: str) -> list[str]:
             if line.startswith("a=group:BUNDLE ")
         ]
         bundle = groups[0] if groups else []
-        if len(mids) < 3 or set(mids) - set(bundle):
+        expected_mids = len(expected_media_kinds(scenario)) + 1
+        if len(mids) < expected_mids or set(mids) - set(bundle):
             failures.append(
                 f"offer does not bundle all media: mids={mids} bundle={bundle}"
             )
@@ -253,10 +265,19 @@ async def run_product_scenario(
         await endpoint.start()
         if isinstance(peer, AiortcEndpoint):
             if scenario.baresip_offerer:
-                offer = await endpoint.offer(media=scenario.media)
-                answer = await peer.answer(offer, media=scenario.media)
+                offer = await endpoint.offer(
+                    media=scenario.media,
+                    audio_only=scenario.audio_only,
+                )
+                answer = await peer.answer(
+                    offer,
+                    media=scenario.media,
+                    audio_only=scenario.audio_only,
+                )
                 await endpoint.set_answer(answer)
             else:
+                if scenario.media:
+                    peer.add_media(audio_only=scenario.audio_only)
                 data_channel = peer.pc.createDataChannel(
                     channel, protocol="baresip-acceptance-v1"
                 )
@@ -269,13 +290,11 @@ async def run_product_scenario(
                     "sdp": peer.pc.localDescription.sdp,
                 }
                 answer = await endpoint.answer(
-                    offer, media=scenario.media
+                    offer,
+                    media=scenario.media,
+                    audio_only=scenario.audio_only,
                 )
-                await peer.pc.setRemoteDescription(
-                    RTCSessionDescription(
-                        sdp=answer["sdp"], type=answer["type"]
-                    )
-                )
+                await peer.set_remote_description(answer)
             await peer.wait_channel_open(channel, 30.0)
             if scenario.late_local_open:
                 channel = "baresip-late-open"
@@ -304,7 +323,8 @@ async def run_product_scenario(
                     if row.get("type") == "inbound-rtp"
                     and row.get("packetsReceived", 0) > 0
                 }
-                if received_kinds != {"audio", "video"}:
+                expected_kinds = expected_media_kinds(scenario)
+                if received_kinds != expected_kinds:
                     failures.append(
                         "aiortc lacks received audio/video: "
                         f"{received_kinds}"
@@ -350,7 +370,7 @@ async def run_product_scenario(
         if "verified sha-256 fingerprint OK" not in log:
             failures.append("baresip log lacks verified DTLS evidence")
         if scenario.media:
-            for kind in ("audio", "video"):
+            for kind in expected_media_kinds(scenario):
                 if f"rtp established ({kind})" not in log:
                     failures.append(
                         f"baresip log lacks established {kind} RTP"

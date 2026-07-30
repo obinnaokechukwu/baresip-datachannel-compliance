@@ -150,7 +150,11 @@ class AiortcEndpoint:
             )
 
     async def answer(
-        self, offer: dict[str, str], *, media: bool = False
+        self,
+        offer: dict[str, str],
+        *,
+        media: bool = False,
+        audio_only: bool = False,
     ) -> dict[str, str]:
         remote_sdp = expand_bundle_transport_attributes(offer["sdp"])
         await self.pc.setRemoteDescription(
@@ -158,7 +162,8 @@ class AiortcEndpoint:
         )
         if media:
             self.pc.addTrack(AudioStreamTrack())
-            self.pc.addTrack(VideoStreamTrack())
+            if not audio_only:
+                self.pc.addTrack(VideoStreamTrack())
         await self.pc.setLocalDescription(await self.pc.createAnswer())
         await self._wait_ice_complete()
         assert self.pc.localDescription is not None
@@ -166,6 +171,21 @@ class AiortcEndpoint:
             "type": self.pc.localDescription.type,
             "sdp": self.pc.localDescription.sdp,
         }
+
+    def add_media(self, *, audio_only: bool = False) -> None:
+        self.pc.addTrack(AudioStreamTrack())
+        if not audio_only:
+            self.pc.addTrack(VideoStreamTrack())
+
+    async def set_remote_description(
+        self, description: dict[str, str]
+    ) -> None:
+        await self.pc.setRemoteDescription(
+            RTCSessionDescription(
+                sdp=expand_bundle_transport_attributes(description["sdp"]),
+                type=description["type"],
+            )
+        )
 
     async def _wait_ice_complete(self, timeout: float = 15.0) -> None:
         async def wait() -> None:
