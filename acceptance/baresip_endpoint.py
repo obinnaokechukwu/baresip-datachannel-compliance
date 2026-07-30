@@ -133,9 +133,10 @@ class BaresipEndpoint:
         *,
         media: bool,
         audio_only: bool = False,
+        data: bool = True,
     ) -> dict[str, str]:
         session_id, answer = await self.answer_session(
-            offer, media=media, audio_only=audio_only
+            offer, media=media, audio_only=audio_only, data=data
         )
         self._session_id = session_id
         return answer
@@ -146,10 +147,13 @@ class BaresipEndpoint:
         *,
         media: bool,
         audio_only: bool = False,
+        data: bool = True,
     ) -> tuple[str, dict[str, str]]:
         self._check_process()
         route = (
-            "/connect/offerer/audiodata"
+            "/connect/offerer"
+            if media and not data
+            else "/connect/offerer/audiodata"
             if audio_only
             else "/connect/offerer/avdata"
             if media

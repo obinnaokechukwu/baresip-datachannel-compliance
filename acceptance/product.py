@@ -566,6 +566,193 @@ async def run_product_scenario(
         await endpoint.close()
 
 
+def inbound_packet_counts(stats: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in stats.get("rows", []):
+        if row.get("type") != "inbound-rtp":
+            continue
+        kind = row.get("kind")
+        if kind not in {"audio", "video"}:
+            continue
+        counts[kind] = counts.get(kind, 0) + int(
+            row.get("packetsReceived", 0)
+        )
+    return counts
+
+
+async def wait_browser_media(
+    peer: ChromiumEndpoint,
+    timeout: float = 15.0,
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        stats = await peer.stats()
+        if (
+            stats.get("connectionState") == "connected"
+            and set(inbound_packet_counts(stats)) == {"audio", "video"}
+        ):
+            return
+        await asyncio.sleep(0.1)
+    raise TimeoutError("Chromium media did not become active")
+
+
+async def run_media_regression(
+    evidence_root: Path,
+    executable: Path,
+    baresip: Path,
+    libre: Path,
+    library_paths: tuple[Path, ...],
+    command: str,
+) -> Verdict:
+    destination = evidence_root / "baresip-chromium-media-regression"
+    destination.mkdir(parents=True, exist_ok=True)
+    failures: list[str] = []
+    duration = 5.0
+    minimum_ratio = 0.8
+    burst_size = 16
+    runs: dict[str, Any] = {}
+
+    async def run_case(loaded: bool) -> None:
+        name = "saturated-data" if loaded else "media-only"
+        case = destination / name
+        case.mkdir(parents=True, exist_ok=True)
+        endpoint = BaresipEndpoint(
+            executable, baresip, library_paths, case / "baresip.log"
+        )
+        peer = ChromiumEndpoint(case / "chrome-profile")
+        offer: dict[str, str] | None = None
+        answer: dict[str, str] | None = None
+        messages = 0
+        received_bytes = 0
+        try:
+            await endpoint.start()
+            await peer.start(media=True)
+            if loaded:
+                await peer.create_channel("media-load")
+            offer = await peer.create_offer()
+            answer = await endpoint.answer(
+                offer, media=True, data=loaded
+            )
+            await peer.set_remote_description(answer)
+            if loaded:
+                await peer.wait_channel_open("media-load", 30.0)
+            await wait_browser_media(peer)
+            before = await peer.stats()
+            started = time.monotonic()
+            payload_body = bytes(
+                index % 251 for index in range(16384 - 8)
+            )
+            while time.monotonic() - started < duration:
+                if loaded:
+                    expected = []
+                    for _ in range(burst_size):
+                        payload = (
+                            messages.to_bytes(8, "big") + payload_body
+                        )
+                        expected.append(("binary", payload))
+                        await peer.send(
+                            "media-load", "binary", payload
+                        )
+                        messages += 1
+                        received_bytes += len(payload)
+                    _, actual = await wait_for_messages(
+                        peer.events, burst_size, "media-load", 5.0
+                    )
+                    if actual != expected:
+                        failures.append(
+                            "saturated data transcript mismatch"
+                        )
+                        break
+                else:
+                    await asyncio.sleep(0.05)
+            elapsed = time.monotonic() - started
+            after = await peer.stats()
+            before_counts = inbound_packet_counts(before)
+            after_counts = inbound_packet_counts(after)
+            deltas = {
+                kind: after_counts.get(kind, 0)
+                - before_counts.get(kind, 0)
+                for kind in ("audio", "video")
+            }
+            runs[name] = {
+                "elapsedSeconds": elapsed,
+                "packetsReceivedBefore": before_counts,
+                "packetsReceivedAfter": after_counts,
+                "packetDeltas": deltas,
+                "dataMessages": messages,
+                "dataBytes": received_bytes,
+            }
+            if any(value <= 0 for value in deltas.values()):
+                failures.append(f"{name} did not receive continuous media")
+            if loaded and messages < 10:
+                failures.append(
+                    "saturated run exchanged fewer than 10 full-size messages"
+                )
+
+            await endpoint.delete_session()
+            await endpoint.close()
+            log = (case / "baresip.log").read_text(errors="replace")
+            for kind in ("audio", "video"):
+                if f"rtp established ({kind})" not in log:
+                    failures.append(
+                        f"{name} lacks established {kind} RTP evidence"
+                    )
+            assert offer is not None and answer is not None
+            (case / "offer.sdp").write_text(offer["sdp"])
+            (case / "answer.sdp").write_text(answer["sdp"])
+            write_json(case / "stats-before.json", before)
+            write_json(case / "stats-after.json", after)
+        finally:
+            await peer.close()
+            await endpoint.close()
+
+    try:
+        await run_case(False)
+        await run_case(True)
+        baseline = runs["media-only"]["packetDeltas"]
+        loaded = runs["saturated-data"]["packetDeltas"]
+        ratios = {
+            kind: loaded[kind] / baseline[kind]
+            if baseline[kind] > 0
+            else 0.0
+            for kind in ("audio", "video")
+        }
+        runs["loadedToBaselineRatios"] = ratios
+        for kind, ratio in ratios.items():
+            if ratio < minimum_ratio:
+                failures.append(
+                    f"{kind} packet rate under load was "
+                    f"{ratio:.1%}, below {minimum_ratio:.0%}"
+                )
+        write_json(
+            destination / "budgets.json",
+            {
+                "measurementSeconds": duration,
+                "minimumLoadedToBaselinePacketRatio": minimum_ratio,
+                "minimumFullSizeMessages": 10,
+                "fullSizeMessageBurst": burst_size,
+            },
+        )
+        write_json(destination / "measurements.json", runs)
+        write_json(destination / "versions.json", versions(baresip, libre))
+        (destination / "command.txt").write_text(command + "\n")
+        verdict = Verdict.FAIL if failures else Verdict.PASS
+        write_json(
+            destination / "result.json",
+            {"verdict": verdict, "failures": failures},
+        )
+        return verdict
+    except Exception as error:
+        write_json(
+            destination / "result.json",
+            {
+                "verdict": Verdict.INFRA_ERROR,
+                "failures": [f"{type(error).__name__}: {error}"],
+            },
+        )
+        return Verdict.INFRA_ERROR
+
+
 async def run_parallel_sessions(
     evidence_root: Path,
     executable: Path,

@@ -12,6 +12,7 @@ from .product import (
     PRODUCT_SCENARIOS,
     run_abrupt_peer_death,
     calibrate_product_oracle,
+    run_media_regression,
     run_parallel_sessions,
     run_pion_scenario,
     run_lifecycle_campaign,
@@ -37,6 +38,16 @@ async def run(args: argparse.Namespace) -> int:
         )
     verdicts["baresip-aiortc-parallel-sessions"] = (
         await run_parallel_sessions(
+            evidence,
+            args.executable.resolve(),
+            args.baresip.resolve(),
+            args.libre.resolve(),
+            library_paths,
+            command,
+        )
+    )
+    verdicts["baresip-chromium-media-regression"] = (
+        await run_media_regression(
             evidence,
             args.executable.resolve(),
             args.baresip.resolve(),
