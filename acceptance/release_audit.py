@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .evidence import write_json
+from .evidence import versions, write_json
 from .model import Verdict
 
 
@@ -223,6 +223,10 @@ def audit(args: argparse.Namespace) -> int:
         failures.append("installed usrsctp notice differs from source notice")
 
     write_json(evidence / "checks.json", checks)
+    write_json(
+        evidence / "versions.json",
+        versions(args.baresip.resolve(), args.libre.resolve()),
+    )
     result = {
         "verdict": Verdict.FAIL if failures else Verdict.PASS,
         "failures": failures,

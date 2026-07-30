@@ -59,4 +59,5 @@ def versions(baresip: Path, libre: Path) -> dict[str, Any]:
         "aiortc": aiortc.__version__,
         "baresip_revision": git_revision(baresip),
         "libre_revision": git_revision(libre),
+        "harness_revision": git_revision(Path(__file__).parents[1]),
     }
