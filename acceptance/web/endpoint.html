@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Chromium WebRTC endpoint</title>
+<title>Browser WebRTC endpoint</title>
 <script>
 "use strict";
 
@@ -70,23 +70,25 @@ async function start(config) {
     const audioDestination = audio.createMediaStreamDestination();
     oscillator.connect(audioDestination);
     oscillator.start();
-    const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 240;
-    const context = canvas.getContext("2d");
-    let frame = 0;
-    const timer = setInterval(() => {
-      context.fillStyle = frame++ % 2 ? "#204080" : "#802040";
-      context.fillRect(0, 0, canvas.width, canvas.height);
-    }, 100);
-    const videoStream = canvas.captureStream(10);
     for (const track of audioDestination.stream.getTracks()) {
       state.pc.addTrack(track, audioDestination.stream);
       state.media.push({track, oscillator, audio});
     }
-    for (const track of videoStream.getTracks()) {
-      state.pc.addTrack(track, videoStream);
-      state.media.push({track, timer});
+    if (!config.audioOnly) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 320;
+      canvas.height = 240;
+      const context = canvas.getContext("2d");
+      let frame = 0;
+      const timer = setInterval(() => {
+        context.fillStyle = frame++ % 2 ? "#204080" : "#802040";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      }, 100);
+      const videoStream = canvas.captureStream(10);
+      for (const track of videoStream.getTracks()) {
+        state.pc.addTrack(track, videoStream);
+        state.media.push({track, timer});
+      }
     }
   }
   emit("ready", {connectionState: state.pc.connectionState});
@@ -134,6 +136,7 @@ async function stats() {
     }
   }
   return {
+    browserUserAgent: navigator.userAgent,
     connectionState: state.pc.connectionState,
     iceConnectionState: state.pc.iceConnectionState,
     signalingState: state.pc.signalingState,

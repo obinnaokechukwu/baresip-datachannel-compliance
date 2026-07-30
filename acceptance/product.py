@@ -12,7 +12,7 @@ from typing import Any
 
 from .aiortc_endpoint import AiortcEndpoint, copy_application_attributes
 from .baresip_endpoint import BaresipEndpoint
-from .chromium import ChromiumEndpoint
+from .chromium import ChromiumEndpoint, FirefoxEndpoint
 from .evidence import versions, write_json
 from .model import MessageRecord, Verdict, compare_ordered, compare_unordered
 from .oracle import calibrate
@@ -97,6 +97,14 @@ PRODUCT_SCENARIOS = (
         "baresip-aiortc-malformed-input", "aiortc", False, True
     ),
     ProductScenario("baresip-chromium-avdata", "chromium", True),
+    ProductScenario("baresip-firefox-data-only", "firefox", False),
+    ProductScenario(
+        "baresip-firefox-audiodata",
+        "firefox",
+        True,
+        audio_only=True,
+    ),
+    ProductScenario("baresip-firefox-avdata", "firefox", True),
 )
 
 
@@ -323,10 +331,12 @@ async def run_product_scenario(
         if scenario.baresip_offerer
         else f"{scenario.peer}-acceptance"
     )
-    peer: AiortcEndpoint | ChromiumEndpoint
+    peer: AiortcEndpoint | ChromiumEndpoint | FirefoxEndpoint
 
     if scenario.peer == "aiortc":
         peer = AiortcEndpoint()
+    elif scenario.peer == "firefox":
+        peer = FirefoxEndpoint(destination / "firefox-profile")
     else:
         peer = ChromiumEndpoint(destination / "chrome-profile")
 
@@ -446,10 +456,17 @@ async def run_product_scenario(
                         f"{received_kinds}"
                     )
         else:
-            await peer.start(media=True)
+            await peer.start(
+                media=scenario.media,
+                audio_only=scenario.audio_only,
+            )
             await peer.create_channel(channel)
             offer = await peer.create_offer()
-            answer = await endpoint.answer(offer, media=True)
+            answer = await endpoint.answer(
+                offer,
+                media=scenario.media,
+                audio_only=scenario.audio_only,
+            )
             await peer.set_remote_description(answer)
             await peer.wait_channel_open(channel, 30.0)
             for message_type, payload in expected_values:
@@ -462,17 +479,22 @@ async def run_product_scenario(
             await asyncio.sleep(1.0)
             stats = await peer.stats()
             if stats.get("connectionState") != "connected":
-                failures.append("Chromium peer connection is not connected")
-            received_kinds = {
-                row.get("kind")
-                for row in stats.get("rows", [])
-                if row.get("type") == "inbound-rtp"
-                and row.get("packetsReceived", 0) > 0
-            }
-            if received_kinds != {"audio", "video"}:
                 failures.append(
-                    f"Chromium lacks received audio/video: {received_kinds}"
+                    f"{scenario.peer} peer connection is not connected"
                 )
+            if scenario.media:
+                received_kinds = {
+                    row.get("kind")
+                    for row in stats.get("rows", [])
+                    if row.get("type") == "inbound-rtp"
+                    and row.get("packetsReceived", 0) > 0
+                }
+                expected_kinds = expected_media_kinds(scenario)
+                if received_kinds != expected_kinds:
+                    failures.append(
+                        f"{scenario.peer} lacks received media: "
+                        f"{received_kinds}"
+                    )
 
         sent = [
             record
@@ -511,7 +533,10 @@ async def run_product_scenario(
         (destination / "offer.sdp").write_text(offer["sdp"])
         (destination / "answer.sdp").write_text(answer["sdp"])
         write_json(destination / "scenario.json", scenario.__dict__)
-        write_json(destination / "versions.json", versions(baresip, libre))
+        version_data = versions(baresip, libre)
+        if stats.get("browserUserAgent"):
+            version_data[scenario.peer] = stats["browserUserAgent"]
+        write_json(destination / "versions.json", version_data)
         write_json(destination / "peer-stats.json", stats)
         write_json(destination / "sent-manifest.json", [x.json() for x in sent])
         write_json(
