@@ -24,6 +24,7 @@ class ProductScenario:
     media: bool
     malformed: bool = False
     baresip_offerer: bool = False
+    late_local_open: bool = False
 
 
 PRODUCT_SCENARIOS = (
@@ -39,6 +40,12 @@ PRODUCT_SCENARIOS = (
         "aiortc",
         True,
         baresip_offerer=True,
+    ),
+    ProductScenario(
+        "baresip-late-open-aiortc-data-only",
+        "aiortc",
+        False,
+        late_local_open=True,
     ),
     ProductScenario(
         "baresip-aiortc-malformed-input", "aiortc", False, True
@@ -270,6 +277,10 @@ async def run_product_scenario(
                     )
                 )
             await peer.wait_channel_open(channel, 30.0)
+            if scenario.late_local_open:
+                channel = "baresip-late-open"
+                await endpoint.create_datachannel(channel)
+                await peer.wait_channel_open(channel, 30.0)
             if scenario.malformed:
                 events, actual_values, malformed_failures = (
                     await exercise_malformed_inputs(peer, channel)

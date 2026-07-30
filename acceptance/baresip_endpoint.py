@@ -147,6 +147,18 @@ class BaresipEndpoint:
         )
         self._check_process()
 
+    async def create_datachannel(self, label: str) -> None:
+        if self._session_id is None:
+            raise RuntimeError("baresip has no active signaling session")
+        await asyncio.to_thread(
+            self._request,
+            "POST",
+            "/datachannel",
+            {"label": label},
+            self._session_id,
+        )
+        self._check_process()
+
     async def delete_session(self) -> None:
         if self._session_id is None:
             return
