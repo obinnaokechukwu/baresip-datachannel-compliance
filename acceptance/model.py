@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
@@ -73,6 +74,37 @@ def compare_ordered(
                 f"record {index} differs: expected={expected.json()} "
                 f"actual={actual.json()}"
             )
+    return OracleResult(
+        Verdict.FAIL if failures else Verdict.PASS, tuple(failures)
+    )
+
+
+def compare_unordered(
+    sent: list[MessageRecord], received: list[MessageRecord]
+) -> OracleResult:
+    def key(record: MessageRecord) -> tuple[Any, ...]:
+        return (
+            record.run,
+            record.association,
+            record.channel,
+            record.direction,
+            record.message_type,
+            record.length,
+            record.sha256,
+            record.payload_hex,
+        )
+
+    expected = Counter(key(record) for record in sent)
+    actual = Counter(key(record) for record in received)
+    failures = (
+        []
+        if expected == actual
+        else [
+            "unordered manifest differs: "
+            f"missing={list((expected - actual).elements())} "
+            f"unexpected={list((actual - expected).elements())}"
+        ]
+    )
     return OracleResult(
         Verdict.FAIL if failures else Verdict.PASS, tuple(failures)
     )

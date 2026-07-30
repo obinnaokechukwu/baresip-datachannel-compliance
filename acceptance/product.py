@@ -11,7 +11,7 @@ from .aiortc_endpoint import AiortcEndpoint
 from .baresip_endpoint import BaresipEndpoint
 from .chromium import ChromiumEndpoint
 from .evidence import versions, write_json
-from .model import MessageRecord, Verdict, compare_ordered
+from .model import MessageRecord, Verdict, compare_ordered, compare_unordered
 from .oracle import calibrate
 
 
@@ -25,10 +25,33 @@ class ProductScenario:
     late_local_open: bool = False
     audio_only: bool = False
     simultaneous_open: bool = False
+    ordered: bool = True
+    max_retransmits: int | None = None
+    max_packet_lifetime: int | None = None
 
 
 PRODUCT_SCENARIOS = (
     ProductScenario("baresip-aiortc-data-only", "aiortc", False),
+    ProductScenario(
+        "baresip-aiortc-unordered-reliable",
+        "aiortc",
+        False,
+        ordered=False,
+    ),
+    ProductScenario(
+        "baresip-aiortc-retransmit-limited",
+        "aiortc",
+        False,
+        ordered=False,
+        max_retransmits=2,
+    ),
+    ProductScenario(
+        "baresip-aiortc-lifetime-limited",
+        "aiortc",
+        False,
+        ordered=False,
+        max_packet_lifetime=1000,
+    ),
     ProductScenario(
         "baresip-aiortc-audiodata",
         "aiortc",
@@ -70,8 +93,20 @@ def payloads() -> tuple[tuple[str, bytes], ...]:
     return (
         ("text", b""),
         ("binary", b""),
+        ("text", b"a"),
+        ("binary", b"\x00"),
         ("text", b"baresip-real-peer"),
         ("binary", bytes(range(256))),
+        ("binary", bytes(index % 251 for index in range(1199))),
+        ("binary", bytes(index % 251 for index in range(1200))),
+        ("binary", bytes(index % 251 for index in range(1201))),
+        ("text", b"x" * 4095),
+        ("text", b"x" * 4096),
+        ("text", b"x" * 4097),
+        ("binary", bytes(index % 251 for index in range(8191))),
+        ("binary", bytes(index % 251 for index in range(8192))),
+        ("binary", bytes(index % 251 for index in range(8193))),
+        ("text", b"x" * 16383),
         ("text", b"x" * 16384),
         ("binary", bytes(index % 251 for index in range(16384))),
     )
@@ -295,7 +330,11 @@ async def run_product_scenario(
                 if scenario.media:
                     peer.add_media(audio_only=scenario.audio_only)
                 data_channel = peer.pc.createDataChannel(
-                    channel, protocol="baresip-acceptance-v1"
+                    channel,
+                    protocol="baresip-acceptance-v1",
+                    ordered=scenario.ordered,
+                    maxRetransmits=scenario.max_retransmits,
+                    maxPacketLifeTime=scenario.max_packet_lifetime,
                 )
                 peer._register(data_channel)
                 await peer.pc.setLocalDescription(await peer.pc.createOffer())
@@ -413,7 +452,8 @@ async def run_product_scenario(
                 scenario, active_channel, values
             )
         ]
-        failures.extend(compare_ordered(sent, received).failures)
+        compare = compare_ordered if scenario.ordered else compare_unordered
+        failures.extend(compare(sent, received).failures)
         assert offer is not None and answer is not None
         failures.extend(check_sdp(scenario, offer["sdp"], answer["sdp"]))
 

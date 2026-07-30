@@ -1,4 +1,9 @@
-from acceptance.model import MessageRecord, Verdict, compare_ordered
+from acceptance.model import (
+    MessageRecord,
+    Verdict,
+    compare_ordered,
+    compare_unordered,
+)
 from acceptance.oracle import INJECTIONS, inject
 
 
@@ -27,5 +32,19 @@ def test_each_injected_violation_fails() -> None:
     for violation in INJECTIONS:
         assert (
             compare_ordered(values, inject(values, violation)).verdict
+            is Verdict.FAIL
+        )
+
+
+def test_unordered_oracle_accepts_only_reordering() -> None:
+    values = records()
+
+    assert (
+        compare_unordered(values, inject(values, "reorder")).verdict
+        is Verdict.PASS
+    )
+    for violation in ("corrupt", "omit", "duplicate"):
+        assert (
+            compare_unordered(values, inject(values, violation)).verdict
             is Verdict.FAIL
         )
