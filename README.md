@@ -32,3 +32,14 @@ The four verdicts are:
 - `INFRA_ERROR`: the harness could not establish product behavior.
 
 Only `PASS` satisfies an acceptance gate.
+
+## Pion interoperability endpoint
+
+The independent Pion endpoint is built outside the Python environment:
+
+```sh
+./scripts/build-pion-endpoint
+```
+
+`dc-product-acceptance` uses `.work/pion-endpoint` by default and records the
+resolved Pion module version in each Pion scenario's evidence bundle.

@@ -12,6 +12,7 @@ from .product import (
     PRODUCT_SCENARIOS,
     calibrate_product_oracle,
     run_parallel_sessions,
+    run_pion_scenario,
     run_product_scenario,
 )
 
@@ -41,6 +42,15 @@ async def run(args: argparse.Namespace) -> int:
             library_paths,
             command,
         )
+    )
+    verdicts["baresip-pion-data-only"] = await run_pion_scenario(
+        evidence,
+        args.executable.resolve(),
+        args.pion_endpoint.resolve(),
+        args.baresip.resolve(),
+        args.libre.resolve(),
+        library_paths,
+        command,
     )
     calibration = calibrate_product_oracle()
     write_json(evidence / "oracle-calibration.json", calibration)
@@ -76,6 +86,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--executable", type=Path, required=True)
     result.add_argument("--baresip", type=Path, required=True)
     result.add_argument("--libre", type=Path, required=True)
+    result.add_argument(
+        "--pion-endpoint",
+        type=Path,
+        default=Path(".work/pion-endpoint"),
+    )
     result.add_argument("--library-path", type=Path, action="append", default=[])
     result.add_argument("--evidence", type=Path, required=True)
     return result

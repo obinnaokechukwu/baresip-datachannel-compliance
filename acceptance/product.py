@@ -646,6 +646,117 @@ async def run_parallel_sessions(
         await endpoint.close()
 
 
+async def run_pion_scenario(
+    evidence_root: Path,
+    executable: Path,
+    pion_endpoint: Path,
+    baresip: Path,
+    libre: Path,
+    library_paths: tuple[Path, ...],
+    command: str,
+) -> Verdict:
+    scenario = ProductScenario("baresip-pion-data-only", "pion", False)
+    destination = evidence_root / scenario.name
+    destination.mkdir(parents=True, exist_ok=True)
+    endpoint = BaresipEndpoint(
+        executable, baresip, library_paths, destination / "baresip.log"
+    )
+    failures: list[str] = []
+    values = list(payloads())
+    label = "pion-acceptance"
+
+    try:
+        await endpoint.start()
+        process = await asyncio.create_subprocess_exec(
+            str(pion_endpoint),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        request = {
+            "baseUrl": "http://127.0.0.1:9000",
+            "label": label,
+            "messages": [
+                {"type": message_type, "payloadHex": payload.hex()}
+                for message_type, payload in values
+            ],
+        }
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(json.dumps(request).encode()), 75.0
+        )
+        (destination / "pion.log").write_bytes(stderr)
+        try:
+            result = json.loads(stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"Pion endpoint returned invalid JSON: {error}"
+            ) from error
+        if process.returncode or result.get("verdict") != Verdict.PASS:
+            failures.extend(result.get("failures") or [])
+
+        actual = [
+            (item["type"], bytes.fromhex(item["payloadHex"]))
+            for item in (result.get("messages") or [])
+        ]
+        sent = records(scenario, label, values)
+        received = records(scenario, label, actual)
+        failures.extend(compare_ordered(sent, received).failures)
+        if result.get("connectionState") != "connected":
+            failures.append("Pion peer connection is not connected")
+        if result.get("iceState") not in {"connected", "completed"}:
+            failures.append("Pion ICE is not connected")
+        if result.get("channelState") != "open":
+            failures.append("Pion data channel is not open")
+
+        await endpoint.close()
+        log = (destination / "baresip.log").read_text(errors="replace")
+        if "connectivity check is complete" not in log:
+            failures.append("baresip log lacks completed ICE evidence")
+        if "verified sha-256 fingerprint OK" not in log:
+            failures.append("baresip log lacks verified DTLS evidence")
+
+        (destination / "command.txt").write_text(command + "\n")
+        (destination / "offer.sdp").write_text(result.get("offer", ""))
+        (destination / "answer.sdp").write_text(result.get("answer", ""))
+        write_json(destination / "scenario.json", scenario.__dict__)
+        version_data = versions(baresip, libre)
+        version_data["pion"] = result.get("pionVersion", "unknown")
+        write_json(destination / "versions.json", version_data)
+        write_json(
+            destination / "peer-stats.json",
+            {
+                key: result.get(key)
+                for key in (
+                    "connectionState",
+                    "iceState",
+                    "channelState",
+                )
+            },
+        )
+        write_json(destination / "sent-manifest.json", [x.json() for x in sent])
+        write_json(
+            destination / "received-manifest.json",
+            [x.json() for x in received],
+        )
+        verdict = Verdict.FAIL if failures else Verdict.PASS
+        write_json(
+            destination / "result.json",
+            {"verdict": verdict, "failures": failures},
+        )
+        return verdict
+    except Exception as error:
+        write_json(
+            destination / "result.json",
+            {
+                "verdict": Verdict.INFRA_ERROR,
+                "failures": [f"{type(error).__name__}: {error}"],
+            },
+        )
+        return Verdict.INFRA_ERROR
+    finally:
+        await endpoint.close()
+
+
 def calibrate_product_oracle() -> dict[str, str]:
     scenario = PRODUCT_SCENARIOS[0]
     values = list(payloads()[:3])
