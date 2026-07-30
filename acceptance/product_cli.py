@@ -35,9 +35,16 @@ async def run(args: argparse.Namespace) -> int:
     write_json(evidence / "oracle-calibration.json", calibration)
     calibrated = (
         calibration["known-good"] == Verdict.PASS
+        and calibration["malformed-known-good"] == Verdict.PASS
         and all(
             calibration[name] == Verdict.FAIL
-            for name in ("corrupt", "omit", "duplicate", "reorder")
+            for name in (
+                "corrupt",
+                "omit",
+                "duplicate",
+                "reorder",
+                "malformed-delivery",
+            )
         )
     )
     passed = calibrated and all(

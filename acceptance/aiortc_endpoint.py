@@ -106,6 +106,13 @@ class AiortcEndpoint:
         channel = self.channels[label]
         channel.send(payload.decode() if message_type == "text" else payload)
 
+    async def send_raw(
+        self, stream_id: int, ppid: int, payload: bytes
+    ) -> None:
+        if self.pc.sctp is None or self.pc.sctp.state != "connected":
+            raise RuntimeError("SCTP association is not connected")
+        await self.pc.sctp._send(stream_id, ppid, payload)
+
     async def drain_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         while not self.events.empty():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,14 @@ class ProductScenario:
     name: str
     peer: str
     media: bool
+    malformed: bool = False
 
 
 PRODUCT_SCENARIOS = (
     ProductScenario("baresip-aiortc-data-only", "aiortc", False),
+    ProductScenario(
+        "baresip-aiortc-malformed-input", "aiortc", False, True
+    ),
     ProductScenario("baresip-chromium-avdata", "chromium", True),
 )
 
@@ -67,6 +72,14 @@ def received_values(events: list[dict[str, Any]]) -> list[tuple[str, bytes]]:
     ]
 
 
+def rejected_message_failures(
+    events: list[dict[str, Any]], label: str
+) -> list[str]:
+    if received_values(events):
+        return [f"{label} reached the application"]
+    return []
+
+
 async def wait_for_messages(
     drain: Any, count: int, timeout: float = 15.0
 ) -> tuple[list[dict[str, Any]], list[tuple[str, bytes]]]:
@@ -82,6 +95,72 @@ async def wait_for_messages(
 
     values = await asyncio.wait_for(wait(), timeout)
     return events, values
+
+
+def dcep_open(label: bytes, protocol: bytes = b"") -> bytes:
+    return (
+        struct.pack("!BBHLHH", 3, 0, 256, 0, len(label), len(protocol))
+        + label
+        + protocol
+    )
+
+
+async def exercise_malformed_inputs(
+    peer: AiortcEndpoint, channel: str
+) -> tuple[list[dict[str, Any]], list[tuple[str, bytes]], list[str]]:
+    failures: list[str] = []
+    events: list[dict[str, Any]] = []
+    control = peer.channels[channel]
+    if control.id is None:
+        return events, [], ["control channel has no stream ID"]
+
+    parity = control.id & 1
+    first_id = 101 if parity else 100
+    malformed = (
+        ("embedded-nul", first_id, dcep_open(b"bad\x00label")),
+        ("invalid-dcep-utf8", first_id + 2, dcep_open(b"\xc0\x80")),
+    )
+    for label, stream_id, payload in malformed:
+        malformed_channel = peer.pc.createDataChannel(
+            label, negotiated=True, id=stream_id
+        )
+        peer._register(malformed_channel)
+        await peer.wait_channel_open(label)
+        await peer.send_raw(stream_id, 50, payload)
+        await asyncio.sleep(0.25)
+        if peer.pc.connectionState != "connected":
+            failures.append(f"{label} damaged the peer connection")
+        malformed_channel.close()
+        events.extend(await peer.drain_events())
+
+    await peer.send_raw(control.id, 51, b"\xc0\x80")
+    await asyncio.sleep(0.5)
+    events.extend(await peer.drain_events())
+    failures.extend(rejected_message_failures(events, "invalid UTF-8 text"))
+
+    oversized = peer.pc.createDataChannel("oversized")
+    peer._register(oversized)
+    await peer.wait_channel_open("oversized")
+    oversized.send(bytes(16385))
+    await asyncio.sleep(0.5)
+    events.extend(await peer.drain_events())
+    if any(
+        event["name"] == "message"
+        and event["body"].get("label") == "oversized"
+        for event in events
+    ):
+        failures.append("oversized message reached the application")
+    if oversized.readyState != "closed":
+        oversized.close()
+
+    expected = [("binary", b"valid-after-invalid-input")]
+    await peer.send(channel, *expected[0])
+    more_events, actual = await wait_for_messages(peer.drain_events, 1)
+    events.extend(more_events)
+
+    if peer.pc.connectionState != "connected":
+        failures.append("malformed input damaged the peer connection")
+    return events, actual, failures
 
 
 def check_sdp(scenario: ProductScenario, offer: str, answer: str) -> list[str]:
@@ -133,7 +212,11 @@ async def run_product_scenario(
     stats: dict[str, Any] = {}
     offer: dict[str, str] | None = None
     answer: dict[str, str] | None = None
-    expected_values = list(payloads())
+    expected_values = (
+        [("binary", b"valid-after-invalid-input")]
+        if scenario.malformed
+        else list(payloads())
+    )
     channel = f"{scenario.peer}-acceptance"
     peer: AiortcEndpoint | ChromiumEndpoint
 
@@ -163,11 +246,17 @@ async def run_product_scenario(
                 )
             )
             await peer.wait_channel_open(channel, 30.0)
-            for message_type, payload in expected_values:
-                await peer.send(channel, message_type, payload)
-            events, actual_values = await wait_for_messages(
-                peer.drain_events, len(expected_values)
-            )
+            if scenario.malformed:
+                events, actual_values, malformed_failures = (
+                    await exercise_malformed_inputs(peer, channel)
+                )
+                failures.extend(malformed_failures)
+            else:
+                for message_type, payload in expected_values:
+                    await peer.send(channel, message_type, payload)
+                events, actual_values = await wait_for_messages(
+                    peer.drain_events, len(expected_values)
+                )
             stats = await peer.stats()
             if stats.get("dtlsState") != "connected":
                 failures.append("aiortc DTLS is not connected")
@@ -207,6 +296,7 @@ async def run_product_scenario(
         failures.extend(check_sdp(scenario, offer["sdp"], answer["sdp"]))
 
         await endpoint.delete_session()
+        await endpoint.close()
         log = (destination / "baresip.log").read_text(errors="replace")
         if "connectivity check is complete" not in log:
             failures.append("baresip log lacks completed ICE evidence")
@@ -258,4 +348,25 @@ def calibrate_product_oracle() -> dict[str, str]:
     values = list(payloads()[:3])
     sent = records(scenario, "calibration", values)
     results = calibrate(sent)
-    return {name: result.verdict for name, result in results.items()}
+    calibration = {name: result.verdict for name, result in results.items()}
+    calibration["malformed-known-good"] = (
+        Verdict.FAIL
+        if rejected_message_failures([], "invalid UTF-8 text")
+        else Verdict.PASS
+    )
+    injected = [
+        {
+            "name": "message",
+            "body": {
+                "label": "calibration",
+                "type": "text",
+                "payloadHex": "ff",
+            },
+        }
+    ]
+    calibration["malformed-delivery"] = (
+        Verdict.FAIL
+        if rejected_message_failures(injected, "invalid UTF-8 text")
+        else Verdict.PASS
+    )
+    return calibration
