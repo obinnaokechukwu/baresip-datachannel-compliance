@@ -1,11 +1,20 @@
 # Evidence bundle schema v1
 
+The evidence bundle supports cross-implementation compatibility claims. It
+identifies which browser or independent language stack communicated with
+baresip, what each peer negotiated, what messages and media crossed the wire,
+and which exact source and runtime artifacts produced the result. This lets a
+reviewer distinguish a repeatable Chrome/Chromium, Firefox, aiortc, or Pion
+interoperability result from an in-process loopback or an unrepeatable local
+test pass.
+
 Each scenario directory is immutable after its `result.json` is written and
 contains:
 
 - `scenario.json`: exact activated scenario and oracle requirements.
 - `command.txt`: exact reproduction command.
-- `versions.json`: OS, browser, aiortc, Python, and dirty-aware source state.
+- `versions.json`: OS and runtime details, the applicable browser, aiortc, or
+  Pion version, and dirty-aware source state.
 - `events.ndjson`: versioned endpoint command/event transcript.
 - `offer.sdp` and `answer.sdp`: negotiated descriptions.
 - `sent-manifest.json` and `received-manifest.json`: deterministic complete

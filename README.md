@@ -1,15 +1,38 @@
 # baresip data-channel compliance
 
-This repository is the external compliance and acceptance harness for baresip
-WebRTC data channels. It deliberately lives outside the baresip and libre Git
-trees.
+This repository is a cross-implementation compatibility and acceptance suite
+for baresip WebRTC data channels. Its primary purpose is to prove that baresip
+can negotiate and communicate with WebRTC implementations that already exist
+outside the baresip/libre ecosystem:
+
+- Chrome/Chromium and Firefox, representing widely deployed browser WebRTC
+  implementations;
+- [aiortc](https://github.com/aiortc/aiortc), an independent Python WebRTC
+  stack; and
+- [Pion](https://github.com/pion/webrtc), an independent Go WebRTC stack.
+
+Unit and loopback tests inside libre or baresip can validate internal
+contracts, but they cannot establish compatibility with these independent
+implementations. This suite exercises baresip as a black-box peer through its
+public signaling surface and the real ICE, DTLS, SCTP, DCEP, SDP, BUNDLE, RTP,
+and TURN protocols. It checks both data-only communication and data channels
+coexisting with audio and video.
+
+The suite deliberately lives outside the baresip and libre Git trees so it
+does not share their private APIs, test-only hooks, fixtures, or build state.
+Here, **external** describes that independent test boundary. **Reproducible**
+means each run records the exact source states, runtime artifacts, dependency
+and peer versions, commands, SDP, message manifests, statistics, and logs
+needed to repeat or diagnose the compatibility result. These are separate
+properties: independent peers establish interoperability, while retained
+provenance and evidence make that result reproducible.
 
 The former foundation gate is retained only as a harness calibration command.
-It uses stable Chrome and aiortc to prove that transcript, transport, media,
-and supervision oracles distinguish known-good behavior from injected
-failures. Its summary is explicitly scoped `HARNESS_CALIBRATION_ONLY` and
-records `product_acceptance: NOT_RUN`; a calibration `PASS` is not a baresip
-product verdict.
+It connects Chrome/Chromium to aiortc to prove that transcript, transport,
+media, and supervision oracles distinguish known-good behavior from injected
+failures before those oracles judge baresip. Its summary is explicitly scoped
+`HARNESS_CALIBRATION_ONLY` and records `product_acceptance: NOT_RUN`; a
+calibration `PASS` is not a baresip product verdict.
 
 ## Reproduce harness calibration
 
