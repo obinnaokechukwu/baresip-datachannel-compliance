@@ -16,8 +16,9 @@ import (
 )
 
 type packet struct {
-	payload []byte
-	address net.Addr
+	payload     []byte
+	address     net.Addr
+	channelData bool
 }
 
 type impairmentStats struct {
@@ -33,13 +34,21 @@ type impairmentStats struct {
 	JitterMillis    int64  `json:"jitterMillis"`
 	Bandwidth       uint64 `json:"bandwidthBitsPerSecond"`
 	MTU             int    `json:"mtu"`
+	DataDropped     uint64 `json:"dataDropped"`
+	DataMTUDropped  uint64 `json:"dataMtuDropped"`
+	DataDelayed     uint64 `json:"dataDelayed"`
+	DataJittered    uint64 `json:"dataJittered"`
+	DataBandwidth   uint64 `json:"dataBandwidthDelayed"`
+	DataReordered   uint64 `json:"dataReordered"`
+	DataDuplicated  uint64 `json:"dataDuplicated"`
+	MinDelayMillis  int64  `json:"minAppliedDelayMillis"`
+	MaxDelayMillis  int64  `json:"maxAppliedDelayMillis"`
 }
 
 type impairedPacketConn struct {
 	net.PacketConn
 	statsMutex     sync.Mutex
-	pending        *packet
-	duplicate      *packet
+	ready          []*packet
 	sequence       uint64
 	dropEvery      uint64
 	reorderEvery   uint64
@@ -68,94 +77,154 @@ func (conn *impairedPacketConn) readPacket(
 	return n, address, nil
 }
 
-func (conn *impairedPacketConn) wait(sequence uint64, size int) {
+func (conn *impairedPacketConn) wait(
+	sequence uint64, size int, channelData bool,
+) {
 	wait := conn.delay
+	jittered := false
 	if conn.jitter > 0 {
 		steps := int64(conn.jitter/time.Millisecond)*2 + 1
 		offset := int64(sequence%uint64(steps)) - steps/2
 		wait += time.Duration(offset) * time.Millisecond
+		jittered = offset != 0
 	}
+	bandwidthDelayed := false
 	if conn.bandwidth > 0 {
 		wait += time.Duration(
 			uint64(size) * 8 * uint64(time.Second) / conn.bandwidth,
 		)
+		bandwidthDelayed = size > 0
 	}
 	if wait > 0 {
 		conn.statsMutex.Lock()
 		conn.stats.Delayed++
+		if channelData {
+			conn.stats.DataDelayed++
+			if jittered {
+				conn.stats.DataJittered++
+			}
+			if bandwidthDelayed {
+				conn.stats.DataBandwidth++
+			}
+		}
+		millis := wait.Milliseconds()
+		if conn.stats.MinDelayMillis == 0 || millis < conn.stats.MinDelayMillis {
+			conn.stats.MinDelayMillis = millis
+		}
+		if millis > conn.stats.MaxDelayMillis {
+			conn.stats.MaxDelayMillis = millis
+		}
 		conn.statsMutex.Unlock()
 		time.Sleep(wait)
 	}
 }
 
+func isChannelData(buffer []byte, n int) bool {
+	return n >= 4 && buffer[0]&0xc0 == 0x40
+}
+
 func copyPacket(buffer []byte, n int, address net.Addr) *packet {
 	payload := make([]byte, n)
 	copy(payload, buffer[:n])
-	return &packet{payload: payload, address: address}
+	return &packet{
+		payload: payload, address: address,
+		channelData: isChannelData(buffer, n),
+	}
 }
 
 func returnPacket(buffer []byte, value *packet) (int, net.Addr, error) {
 	return copy(buffer, value.payload), value.address, nil
 }
 
-func (conn *impairedPacketConn) ReadFrom(
+func (conn *impairedPacketConn) nextPacket(
 	buffer []byte,
-) (int, net.Addr, error) {
-	if conn.duplicate != nil {
-		value := conn.duplicate
-		conn.duplicate = nil
-		return returnPacket(buffer, value)
-	}
-	if conn.pending != nil {
-		value := conn.pending
-		conn.pending = nil
-		return returnPacket(buffer, value)
-	}
-
+) (*packet, uint64, error) {
 	for {
 		n, address, err := conn.readPacket(buffer)
 		if err != nil {
-			return n, address, err
+			return nil, 0, err
 		}
 		conn.sequence++
 		sequence := conn.sequence
+		channelData := isChannelData(buffer, n)
 		if conn.mtu > 0 && n > conn.mtu {
 			conn.statsMutex.Lock()
 			conn.stats.MTUDropped++
+			if channelData {
+				conn.stats.DataMTUDropped++
+			}
 			conn.statsMutex.Unlock()
 			continue
 		}
 		if conn.dropEvery > 0 && sequence%conn.dropEvery == 0 {
 			conn.statsMutex.Lock()
 			conn.stats.Dropped++
+			if channelData {
+				conn.stats.DataDropped++
+			}
 			conn.statsMutex.Unlock()
 			continue
 		}
-		conn.wait(sequence, n)
-		current := copyPacket(buffer, n, address)
-		if conn.duplicateEvery > 0 &&
-			sequence%conn.duplicateEvery == 0 {
-			conn.statsMutex.Lock()
-			conn.stats.Duplicated++
-			conn.statsMutex.Unlock()
-			conn.duplicate = current
-		}
-		if conn.reorderEvery > 0 &&
-			sequence%conn.reorderEvery == 0 {
-			nextBuffer := make([]byte, len(buffer))
-			nextN, nextAddress, nextErr := conn.readPacket(nextBuffer)
-			if nextErr != nil {
-				return nextN, nextAddress, nextErr
-			}
-			conn.statsMutex.Lock()
-			conn.stats.Reordered++
-			conn.statsMutex.Unlock()
-			conn.pending = current
-			conn.wait(sequence+1, nextN)
-			return nextN, nextAddress, nil
-		}
-		return returnPacket(buffer, current)
+		conn.wait(sequence, n, channelData)
+		return copyPacket(buffer, n, address), sequence, nil
 	}
+}
+
+func (conn *impairedPacketConn) ReadFrom(
+	buffer []byte,
+) (int, net.Addr, error) {
+	if len(conn.ready) > 0 {
+		value := conn.ready[0]
+		conn.ready = conn.ready[1:]
+		return returnPacket(buffer, value)
+	}
+	current, sequence, err := conn.nextPacket(buffer)
+	if err != nil {
+		return 0, nil, err
+	}
+	duplicateCurrent := conn.duplicateEvery > 0 &&
+		sequence%conn.duplicateEvery == 0
+	if duplicateCurrent {
+		conn.statsMutex.Lock()
+		conn.stats.Duplicated++
+		if current.channelData {
+			conn.stats.DataDuplicated++
+		}
+		conn.statsMutex.Unlock()
+	}
+	if conn.reorderEvery > 0 && sequence%conn.reorderEvery == 0 {
+		nextBuffer := make([]byte, len(buffer))
+		next, nextSequence, nextErr := conn.nextPacket(nextBuffer)
+		if nextErr != nil {
+			return 0, nil, nextErr
+		}
+		duplicateNext := conn.duplicateEvery > 0 &&
+			nextSequence%conn.duplicateEvery == 0
+		conn.statsMutex.Lock()
+		conn.stats.Reordered++
+		if current.channelData || next.channelData {
+			conn.stats.DataReordered++
+		}
+		if duplicateNext {
+			conn.stats.Duplicated++
+			if next.channelData {
+				conn.stats.DataDuplicated++
+			}
+		}
+		conn.statsMutex.Unlock()
+		if duplicateNext {
+			conn.ready = append(conn.ready, next)
+		}
+		conn.ready = append(conn.ready, current)
+		if duplicateCurrent {
+			conn.ready = append(conn.ready, current)
+		}
+		return returnPacket(buffer, next)
+	}
+	if duplicateCurrent {
+		conn.ready = append(conn.ready, current)
+	}
+	return returnPacket(buffer, current)
 }
 
 func (conn *impairedPacketConn) snapshot() impairmentStats {

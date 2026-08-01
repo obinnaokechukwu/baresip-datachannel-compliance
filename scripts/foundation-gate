@@ -29,10 +29,11 @@ if [ -z "$BARESIP" ] || [ -z "$LIBRE" ]; then
 	exit 2
 fi
 
+echo "note: foundation-gate is retired as a product release gate;" >&2
+echo "running harness oracle and supervision calibration only" >&2
 python3 -m venv "$VENV"
 "$VENV/bin/python" -m pip install --disable-pip-version-check -e "$ROOT[test]"
 "$VENV/bin/python" -m pytest "$ROOT/tests"
-rm -rf "$EVIDENCE"
 "$VENV/bin/dc-acceptance" \
 	--baresip "$BARESIP" \
 	--libre "$LIBRE" \

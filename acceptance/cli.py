@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .baresip_probe import baseline
-from .evidence import write_json
+from .evidence import prepare_evidence_dir, write_json
 from .model import MessageRecord, Verdict
 from .oracle import (
     calibrate,
@@ -22,7 +22,7 @@ from .supervision import classify_process
 
 async def run(args: argparse.Namespace) -> int:
     evidence = args.evidence.resolve()
-    evidence.mkdir(parents=True, exist_ok=True)
+    prepare_evidence_dir(evidence)
     command = " ".join(sys.orig_argv)
 
     scenario_verdicts = {}
@@ -123,7 +123,6 @@ async def run(args: argparse.Namespace) -> int:
         and supervision["success"] is Verdict.PASS
         and supervision["crash"] is Verdict.INFRA_ERROR
         and supervision["hang"] is Verdict.INFRA_ERROR
-        and baresip_result["verdict"] is Verdict.UNSUPPORTED
         and all(
             result.verdict
             is (Verdict.PASS if name.endswith("known-good") else Verdict.FAIL)
@@ -131,6 +130,8 @@ async def run(args: argparse.Namespace) -> int:
         )
     )
     summary = {
+        "scope": "HARNESS_CALIBRATION_ONLY",
+        "product_acceptance": "NOT_RUN",
         "verdict": Verdict.PASS if passed else Verdict.FAIL,
         "scenarios": scenario_verdicts,
         "oracle_calibration": {
@@ -141,7 +142,7 @@ async def run(args: argparse.Namespace) -> int:
             name: result.verdict
             for name, result in nontranscript_calibration.items()
         },
-        "baresip_baseline": baresip_result["verdict"],
+        "baresip_capability": baresip_result["capability_status"],
     }
     write_json(evidence / "foundation-summary.json", summary)
     print(json.dumps(summary, indent=2))

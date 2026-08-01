@@ -23,14 +23,17 @@ def baseline(baresip: Path) -> dict[str, Any]:
     ]
     if missing:
         return {
-            "verdict": Verdict.UNSUPPORTED,
+            "capability_status": Verdict.UNSUPPORTED,
             "capability": "webrtc-datachannel",
             "missing_public_api": missing,
             "media_baseline": "covered by upstream peerconnection regression",
         }
     return {
-        "verdict": Verdict.FAIL,
+        "capability_status": "AVAILABLE_NOT_TESTED",
         "capability": "webrtc-datachannel",
         "missing_public_api": [],
-        "reason": "public API exists but no external baresip scenario ran",
+        "reason": (
+            "public API exists; product acceptance is outside harness "
+            "calibration scope"
+        ),
     }

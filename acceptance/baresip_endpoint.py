@@ -22,6 +22,7 @@ class BaresipEndpoint:
         ice_server: str | None = None,
         ice_username: str | None = None,
         ice_password: str | None = None,
+        ice_relay_only: bool = False,
     ) -> None:
         self._executable = executable
         self._source = source
@@ -30,6 +31,7 @@ class BaresipEndpoint:
         self._ice_server = ice_server
         self._ice_username = ice_username
         self._ice_password = ice_password
+        self._ice_relay_only = ice_relay_only
         self._process: asyncio.subprocess.Process | None = None
         self._log_task: asyncio.Task[None] | None = None
         self._session_id: str | None = None
@@ -42,14 +44,10 @@ class BaresipEndpoint:
             paths.append(existing)
         env["LD_LIBRARY_PATH"] = ":".join(paths)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        ice_arguments = ["-i", self._ice_server or "null"]
-        if self._ice_username is not None:
-            ice_arguments.extend(("-u", self._ice_username))
-        if self._ice_password is not None:
-            ice_arguments.extend(("-p", self._ice_password))
+        ice_arguments = self._ice_arguments()
+
         self._process = await asyncio.create_subprocess_exec(
             str(self._executable),
-            "-v",
             *ice_arguments,
             "-w",
             str(self._source / "webrtc" / "www"),
@@ -64,6 +62,16 @@ class BaresipEndpoint:
         except BaseException:
             await self.close()
             raise
+
+    def _ice_arguments(self) -> list[str]:
+        arguments = ["-i", self._ice_server or "null"]
+        if self._ice_username is not None:
+            arguments.extend(("-u", self._ice_username))
+        if self._ice_password is not None:
+            arguments.extend(("-p", self._ice_password))
+        if self._ice_relay_only:
+            arguments.append("-R")
+        return arguments
 
     async def _wait_ready(self) -> None:
         while True:
@@ -126,6 +134,29 @@ class BaresipEndpoint:
             "fileDescriptors": process.num_fds(),
             "threads": process.num_threads(),
         }
+
+    async def wait_session_missing(
+        self, session_id: str, timeout: float
+    ) -> float:
+        started = asyncio.get_running_loop().time()
+
+        async def wait() -> float:
+            while True:
+                self._check_process()
+                try:
+                    await asyncio.to_thread(
+                        self._request,
+                        "POST",
+                        "/datachannel",
+                        {"probe": "session-exists"},
+                        session_id,
+                    )
+                except urllib.error.HTTPError as error:
+                    if error.code == 404:
+                        return asyncio.get_running_loop().time() - started
+                await asyncio.sleep(0.1)
+
+        return await asyncio.wait_for(wait(), timeout)
 
     async def answer(
         self,
@@ -213,12 +244,17 @@ class BaresipEndpoint:
     async def create_datachannel(self, label: str) -> None:
         if self._session_id is None:
             raise RuntimeError("baresip has no active signaling session")
+        await self.create_datachannel_id(self._session_id, label)
+
+    async def create_datachannel_id(
+        self, session_id: str, label: str
+    ) -> None:
         await asyncio.to_thread(
             self._request,
             "POST",
             "/datachannel",
             {"label": label},
-            self._session_id,
+            session_id,
         )
         self._check_process()
 
@@ -230,14 +266,16 @@ class BaresipEndpoint:
 
     async def delete_session_id(
         self, session_id: str, *, missing_ok: bool = False
-    ) -> None:
+    ) -> bool:
         try:
             await asyncio.to_thread(
                 self._request, "DELETE", "/connect", None, session_id
             )
         except urllib.error.HTTPError as error:
-            if not (missing_ok and error.code == 404):
-                raise
+            if missing_ok and error.code == 404:
+                return False
+            raise
+        return True
 
     async def close(self) -> None:
         try:

@@ -5,6 +5,7 @@ from typing import Any
 
 from aiortc import (
     AudioStreamTrack,
+    RTCConfiguration,
     RTCDataChannel,
     RTCPeerConnection,
     RTCSessionDescription,
@@ -124,8 +125,11 @@ def copy_application_attributes(
 
 
 class AiortcEndpoint:
-    def __init__(self) -> None:
-        self.pc = RTCPeerConnection()
+    def __init__(self, host_ip: str | None = None) -> None:
+        self._host_ip = host_ip
+        self.pc = RTCPeerConnection(
+            RTCConfiguration(iceServers=[]) if host_ip else None
+        )
         self.channels: dict[str, RTCDataChannel] = {}
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -141,6 +145,36 @@ class AiortcEndpoint:
                     "body": {"connectionState": self.pc.connectionState},
                 }
             )
+
+    def constrain_ice(self) -> None:
+        if self._host_ip is None:
+            return
+        gatherers = []
+        if self.pc.sctp is not None:
+            gatherers.append(self.pc.sctp.transport.transport.iceGatherer)
+        for transceiver in self.pc.getTransceivers():
+            gatherers.append(
+                transceiver.receiver.transport.transport.iceGatherer
+            )
+        for gatherer in gatherers:
+            connection = gatherer._connection
+            if getattr(connection, "_acceptance_host_constrained", False):
+                continue
+            original = connection.get_component_candidates
+            host_ip = self._host_ip
+
+            async def get_component_candidates(
+                component: int,
+                addresses: list[str],
+                *,
+                _original=original,
+                _host_ip=host_ip,
+            ):
+                del addresses
+                return await _original(component, [_host_ip])
+
+            connection.get_component_candidates = get_component_candidates
+            connection._acceptance_host_constrained = True
 
     def _register(self, channel: RTCDataChannel) -> None:
         self.channels[channel.label] = channel
@@ -205,6 +239,7 @@ class AiortcEndpoint:
             self.pc.addTrack(AudioStreamTrack())
             if not audio_only:
                 self.pc.addTrack(VideoStreamTrack())
+        self.constrain_ice()
         await self.pc.setLocalDescription(await self.pc.createAnswer())
         await self._wait_ice_complete()
         assert self.pc.localDescription is not None

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -144,6 +145,20 @@ func deleteSession(client *http.Client, baseURL, sessionID string) {
 	}
 }
 
+func relayOnlySDP(sdp string) string {
+	lines := strings.Split(sdp, "\n")
+	filtered := lines[:0]
+	for _, line := range lines {
+		candidate := strings.TrimSuffix(line, "\r")
+		if strings.HasPrefix(candidate, "a=candidate:") &&
+			!strings.Contains(" "+candidate+" ", " typ relay ") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.Join(filtered, "\n")
+}
+
 func run(input request) (output result) {
 	output.PionVersion = pionVersion()
 	output.Verdict = "INFRA_ERROR"
@@ -236,6 +251,10 @@ func run(input request) (output result) {
 		return output
 	}
 	output.Answer = answer.SDP
+	if input.ForceRelay {
+		answer.SDP = relayOnlySDP(answer.SDP)
+		output.Answer = answer.SDP
+	}
 	err = pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  answer.SDP,
@@ -263,10 +282,6 @@ func run(input request) (output result) {
 	output.LocalCandidateType = pair.Local.Typ.String()
 	output.RemoteCandidateType = pair.Remote.Typ.String()
 	output.SelectedPair = pair.String()
-	if input.AbortAfterOpen {
-		output.Verdict = "PASS"
-		return output
-	}
 	for _, item := range input.Messages {
 		payload, decodeErr := hex.DecodeString(item.PayloadHex)
 		if decodeErr != nil {
